@@ -413,7 +413,12 @@ function extraerServiciosArea(area) {
   return area.services
     .map((service) => ({
       id: service.id,
-      title: typeof service?.title === "string" ? service.title.trim() : ""
+      title: typeof service?.title === "string" ? service.title.trim() : "",
+      price: service.price,
+      sale_price: service.sale_price,
+      excerpt: typeof service?.excerpt === "string" ? service.excerpt.trim() : "",
+      is_presential: Boolean(service.is_presential),
+      is_virtual: Boolean(service.is_virtual)
     }))
     .filter((service) => service.title);
 }
@@ -428,6 +433,69 @@ function construirMensajeServiciosCotizacion(area, servicios) {
 ${listadoServicios}
 
 Responde con el numero del servicio que deseas consultar.`;
+}
+
+function formatearPrecio(valor) {
+  if (valor === null || valor === undefined || valor === "") {
+    return "Disponible con asesor";
+  }
+
+  const numero = Number(valor);
+
+  if (!Number.isFinite(numero)) {
+    return "Disponible con asesor";
+  }
+
+  return `$${numero}`;
+}
+
+function tienePromocion(servicio) {
+  if (servicio.sale_price === null || servicio.sale_price === undefined || servicio.sale_price === "") {
+    return false;
+  }
+
+  return Number(servicio.sale_price) !== Number(servicio.price);
+}
+
+function construirTextoModalidad(servicio) {
+  if (servicio.is_presential && servicio.is_virtual) {
+    return "🩺 Modalidad:\n• Presencial\n• Virtual";
+  }
+
+  if (servicio.is_presential) {
+    return "🩺 Modalidad:\n• Presencial";
+  }
+
+  if (servicio.is_virtual) {
+    return "🩺 Modalidad:\n• Virtual";
+  }
+
+  return "🩺 Modalidad:\nInformación de modalidad disponible con un asesor.";
+}
+
+function construirMensajeDetalleServicio(servicio) {
+  const bloques = [
+    `📌 Servicio: ${servicio.title}`,
+    `💲 Precio: ${formatearPrecio(servicio.price)}`
+  ];
+
+  if (tienePromocion(servicio)) {
+    bloques.push(`🏷️ Promoción: ${formatearPrecio(servicio.sale_price)}`);
+  }
+
+  bloques.push(construirTextoModalidad(servicio));
+
+  if (servicio.excerpt) {
+    bloques.push(`📝 ${servicio.excerpt}`);
+  }
+
+  bloques.push(`📲 ¿Necesitas ayuda personalizada?
+Si no encuentras el servicio que necesitas, nuestro equipo puede ayudarte:
+
+wa.me/593939034743
+☎️ 0939034743`);
+
+  return bloques.join("\n\n");
 }
 
 async function manejarSeleccionAreaCotizacion(from, text) {
@@ -494,10 +562,13 @@ async function manejarSeleccionServicioCotizacion(from, text) {
     servicioTitle: servicioSeleccionado.title
   });
 
-  await enviarMensajeTexto(
-    from,
-    "Ya recibimos tu seleccion. En el siguiente paso te mostraremos la informacion del servicio seleccionado."
-  );
+  sesionesCotizacion.set(from, {
+    ...sesion,
+    servicioSeleccionado,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeTexto(from, construirMensajeDetalleServicio(servicioSeleccionado));
 }
 
 async function enviarAreasCotizacion(to) {
