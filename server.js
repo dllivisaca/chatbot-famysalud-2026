@@ -14,6 +14,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const WHATSAPP_API_VERSION = "v20.0";
 const sesionesCotizacion = new Map();
+const mensajesProcesados = new Set();
 
 const TEXTOS = {
   menuPrincipal: `Hola 👋 Soy el asistente virtual de FamySALUD.
@@ -217,16 +218,27 @@ app.post("/webhook", async (req, res) => {
   }
 
   try {
+    const messageId = message.id;
     const from = message.from;
     const text = extraerTexto(message);
     const buttonId = extraerButtonReplyId(message);
 
     console.log("[MENSAJE] Recibido:", {
+      messageId,
       from,
       type: message.type,
       text,
       buttonId
     });
+
+    if (messageId && mensajesProcesados.has(messageId)) {
+      console.log("[MENSAJE] Duplicado ignorado:", { messageId, from });
+      return res.sendStatus(200);
+    }
+
+    if (messageId) {
+      mensajesProcesados.add(messageId);
+    }
 
     if (buttonId) {
       await manejarBoton(from, buttonId);
@@ -238,11 +250,19 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (estaEsperandoAreaCotizacion(from) && esNumero(text)) {
+      await enviarMensajeTexto(
+        from,
+        "Ya recibimos tu seleccion. En el siguiente paso te mostraremos los servicios disponibles de esa area."
+      );
+      return res.sendStatus(200);
+    }
+
     await enviarMenu(from, "principal");
     return res.sendStatus(200);
   } catch (error) {
     console.error("[ERROR] Procesando mensaje:", error.response?.data || error.message);
-    return res.sendStatus(500);
+    return res.sendStatus(200);
   }
 });
 
@@ -276,6 +296,14 @@ function debeMostrarMenu(text) {
   }
 
   return ["hola", "menu", "menú"].includes(text);
+}
+
+function estaEsperandoAreaCotizacion(from) {
+  return sesionesCotizacion.get(from)?.paso === "esperando_area";
+}
+
+function esNumero(text) {
+  return /^\d+$/.test(text);
 }
 
 function extraerMensaje(body) {
