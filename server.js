@@ -133,7 +133,31 @@ const ACCIONES_BOTONES = {
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text", text: TEXTOS.trabaja },
 
-  paciente_agendar_cita: { type: "text", text: "Para agendar tu cita, un asesor te contactará pronto." },
+  paciente_agendar_cita: { type: "text", text: `¡Perfecto! 💙
+
+Puedes agendar tu cita de forma rápida desde nuestra aplicación web:
+
+🌐 app.famysaludec.com
+
+Nuestra plataforma es fácil de usar y protegemos tu información de manera segura 🔒
+
+Si necesitas ayuda para utilizarla, aquí tienes nuestros tutoriales:
+
+📘 Manual:
+tinyurl.com/ManualFS
+
+🎥 Video tutorial:
+tinyurl.com/VideoTutorialFS
+
+Si no encuentras el servicio que necesitas, no encuentras un turno específico, deseas consultar más disponibilidad o requieres una atención más urgente o personalizada, puedes contactarnos directamente:
+
+💬 WhatsApp:
+wa.me/593939034743
+
+📞 Llamadas:
+0939034743
+
+Estaremos encantados de ayudarte 😊` },
   paciente_cotizar: { type: "text", text: "Cuéntanos qué servicio deseas cotizar y un asesor te apoyará." },
   paciente_mas_opciones_1: { type: "menu", menu: "pacientesMasOpciones1" },
   paciente_resultados: { type: "text", text: "Para solicitar resultados, por favor comparte tus datos con un asesor." },
