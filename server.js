@@ -245,16 +245,18 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (debeMostrarMenu(text)) {
-      await enviarMenu(from, "principal");
+    if (estaEsperandoAreaCotizacion(from)) {
+      await manejarSeleccionAreaCotizacion(from, text);
       return res.sendStatus(200);
     }
 
-    if (estaEsperandoAreaCotizacion(from) && esNumero(text)) {
-      await enviarMensajeTexto(
-        from,
-        "Ya recibimos tu seleccion. En el siguiente paso te mostraremos los servicios disponibles de esa area."
-      );
+    if (estaEsperandoServicioCotizacion(from)) {
+      await manejarSeleccionServicioCotizacion(from, text);
+      return res.sendStatus(200);
+    }
+
+    if (debeMostrarMenu(text)) {
+      await enviarMenu(from, "principal");
       return res.sendStatus(200);
     }
 
@@ -300,6 +302,10 @@ function debeMostrarMenu(text) {
 
 function estaEsperandoAreaCotizacion(from) {
   return sesionesCotizacion.get(from)?.paso === "esperando_area";
+}
+
+function estaEsperandoServicioCotizacion(from) {
+  return sesionesCotizacion.get(from)?.paso === "esperando_servicio";
 }
 
 function esNumero(text) {
@@ -365,7 +371,8 @@ function extraerAreasCatalogo(catalogo) {
 
     areasPorTitulo.set(title, {
       id: area.id,
-      title
+      title,
+      services: Array.isArray(area.services) ? area.services : []
     });
   }
 
@@ -382,6 +389,115 @@ function construirMensajeAreasCotizacion(areas) {
 ${listadoAreas}
 
 Responde con el numero del area para ver sus servicios.`;
+}
+
+function obtenerIndiceDesdeTexto(text) {
+  if (!esNumero(text)) {
+    return null;
+  }
+
+  const numero = Number.parseInt(text, 10);
+
+  if (!Number.isInteger(numero) || numero < 1) {
+    return null;
+  }
+
+  return numero - 1;
+}
+
+function extraerServiciosArea(area) {
+  if (!Array.isArray(area?.services)) {
+    return [];
+  }
+
+  return area.services
+    .map((service) => ({
+      id: service.id,
+      title: typeof service?.title === "string" ? service.title.trim() : ""
+    }))
+    .filter((service) => service.title);
+}
+
+function construirMensajeServiciosCotizacion(area, servicios) {
+  const listadoServicios = servicios
+    .map((servicio, index) => `${index + 1}. ${servicio.title}`)
+    .join("\n");
+
+  return `Estos son los servicios disponibles en ${area.title}:
+
+${listadoServicios}
+
+Responde con el numero del servicio que deseas consultar.`;
+}
+
+async function manejarSeleccionAreaCotizacion(from, text) {
+  const sesion = sesionesCotizacion.get(from);
+  const indiceArea = obtenerIndiceDesdeTexto(text);
+  const areaSeleccionada = indiceArea === null ? null : sesion?.areas?.[indiceArea];
+
+  if (!areaSeleccionada) {
+    console.warn("[COTIZACION] Numero de area invalido:", {
+      from,
+      text,
+      totalAreas: sesion?.areas?.length || 0
+    });
+    await enviarMensajeTexto(from, "Por favor selecciona un numero valido del listado.");
+    return;
+  }
+
+  const servicios = extraerServiciosArea(areaSeleccionada);
+
+  console.log("[COTIZACION] Area seleccionada:", {
+    from,
+    areaId: areaSeleccionada.id,
+    areaTitle: areaSeleccionada.title,
+    totalServicios: servicios.length
+  });
+
+  if (servicios.length === 0) {
+    await enviarMensajeTexto(
+      from,
+      `En este momento no encontramos servicios disponibles en ${areaSeleccionada.title}. Por favor selecciona otra area del listado.`
+    );
+    return;
+  }
+
+  sesionesCotizacion.set(from, {
+    paso: "esperando_servicio",
+    areas: sesion.areas,
+    areaSeleccionada,
+    servicios,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeTexto(from, construirMensajeServiciosCotizacion(areaSeleccionada, servicios));
+}
+
+async function manejarSeleccionServicioCotizacion(from, text) {
+  const sesion = sesionesCotizacion.get(from);
+  const indiceServicio = obtenerIndiceDesdeTexto(text);
+  const servicioSeleccionado = indiceServicio === null ? null : sesion?.servicios?.[indiceServicio];
+
+  if (!servicioSeleccionado) {
+    console.warn("[COTIZACION] Numero de servicio invalido:", {
+      from,
+      text,
+      totalServicios: sesion?.servicios?.length || 0
+    });
+    await enviarMensajeTexto(from, "Por favor selecciona un numero valido del listado de servicios.");
+    return;
+  }
+
+  console.log("[COTIZACION] Servicio seleccionado:", {
+    from,
+    servicioId: servicioSeleccionado.id,
+    servicioTitle: servicioSeleccionado.title
+  });
+
+  await enviarMensajeTexto(
+    from,
+    "Ya recibimos tu seleccion. En el siguiente paso te mostraremos la informacion del servicio seleccionado."
+  );
 }
 
 async function enviarAreasCotizacion(to) {
