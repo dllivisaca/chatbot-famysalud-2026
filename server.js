@@ -13,8 +13,12 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const WHATSAPP_API_VERSION = "v20.0";
+const SESION_USUARIO_TTL_MS = 5 * 1000;
+const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const mensajesProcesados = new Set();
+const temporizadoresSesion = new Map();
+const sesionesExpiradas = new Set();
 
 const TEXTOS = {
   menuPrincipal: `Hola 👋 Soy el asistente virtual de FamySALUD.
@@ -129,6 +133,7 @@ const MENUS = {
 };
 
 const ACCIONES_BOTONES = {
+  main_menu: { type: "main_menu" },
   main_atenderme: { type: "menu", menu: "pacientes" },
   main_empresas: { type: "menu", menu: "empresas" },
   main_mas_opciones: { type: "menu", menu: "principalMasOpciones" },
@@ -192,6 +197,7 @@ Estaremos encantados de ayudarte 😊` },
   alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." }
 };
 
+ACCIONES_BOTONES.paciente_agendar_cita.type = "text_with_main_menu";
 
 // Verificacion del webhook requerida por Meta WhatsApp Cloud API.
 app.get("/webhook", (req, res) => {
@@ -240,6 +246,31 @@ app.post("/webhook", async (req, res) => {
       mensajesProcesados.add(messageId);
     }
 
+    if (debeResetearConversacion(text)) {
+      limpiarSesionesUsuario(from);
+      actualizarSesionUsuario(from);
+      await enviarMenu(from, "principal");
+      return res.sendStatus(200);
+    }
+
+    if (consumirMarcaSesionExpirada(from)) {
+      actualizarSesionUsuario(from);
+      await enviarMenu(from, "principal");
+      return res.sendStatus(200);
+    }
+
+    if (consumirSesionUsuarioExpirada(from)) {
+      await enviarMensajeTexto(
+        from,
+        "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
+      );
+      await enviarMenu(from, "principal");
+      actualizarSesionUsuario(from);
+      return res.sendStatus(200);
+    }
+
+    actualizarSesionUsuario(from);
+
     if (buttonId) {
       await manejarBoton(from, buttonId);
       return res.sendStatus(200);
@@ -279,6 +310,13 @@ async function manejarBoton(to, buttonId) {
 
   console.log("[BOTON] Accion resuelta:", accion);
 
+  if (accion.type === "main_menu") {
+    limpiarSesionesUsuario(to);
+    actualizarSesionUsuario(to);
+    await enviarMenu(to, "principal");
+    return;
+  }
+
   if (accion.type === "menu") {
     await enviarMenu(to, accion.menu);
     return;
@@ -286,6 +324,11 @@ async function manejarBoton(to, buttonId) {
 
   if (accion.type === "catalog_areas") {
     await enviarAreasCotizacion(to);
+    return;
+  }
+
+  if (accion.type === "text_with_main_menu") {
+    await enviarMensajeConMenuPrincipal(to, accion.text);
     return;
   }
 
@@ -297,15 +340,118 @@ function debeMostrarMenu(text) {
     return true;
   }
 
-  return ["hola", "menu", "menú"].includes(text);
+  return debeResetearConversacion(text);
+}
+
+function debeResetearConversacion(text) {
+  return ["hola", "menu", "menú", "inicio"].includes(text);
+}
+
+function sesionExpirada(sesion) {
+  return !sesion?.timestamp || Date.now() - sesion.timestamp > SESION_USUARIO_TTL_MS;
+}
+
+function obtenerSesionUsuario(from) {
+  return sesionesUsuarios.get(from) || null;
+}
+
+function actualizarSesionUsuario(from) {
+  sesionesUsuarios.set(from, {
+    timestamp: Date.now()
+  });
+  sesionesExpiradas.delete(from);
+  programarExpiracionSesion(from);
+}
+
+function limpiarSesionesUsuario(from) {
+  sesionesUsuarios.delete(from);
+  sesionesCotizacion.delete(from);
+  sesionesExpiradas.delete(from);
+  cancelarExpiracionSesion(from);
+}
+
+function programarExpiracionSesion(from) {
+  cancelarExpiracionSesion(from);
+
+  const timer = setTimeout(() => {
+    expirarSesionUsuario(from);
+  }, SESION_USUARIO_TTL_MS);
+
+  temporizadoresSesion.set(from, timer);
+}
+
+function cancelarExpiracionSesion(from) {
+  const timer = temporizadoresSesion.get(from);
+
+  if (timer) {
+    clearTimeout(timer);
+    temporizadoresSesion.delete(from);
+  }
+}
+
+async function expirarSesionUsuario(from) {
+  const sesion = obtenerSesionUsuario(from);
+
+  if (!sesion || sesionesExpiradas.has(from)) {
+    return;
+  }
+
+  sesionesUsuarios.delete(from);
+  sesionesCotizacion.delete(from);
+  cancelarExpiracionSesion(from);
+  sesionesExpiradas.add(from);
+  console.log("[SESION] Expirada", { from });
+
+  try {
+    await enviarMensajeTexto(
+      from,
+      "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
+    );
+    await enviarMenu(from, "principal");
+  } catch (error) {
+    console.error("[SESION] Error enviando expiracion:", error.response?.data || error.message);
+  }
+}
+
+function sesionUsuarioActiva(from) {
+  const sesion = obtenerSesionUsuario(from);
+  return Boolean(sesion && !sesionExpirada(sesion));
+}
+
+function consumirMarcaSesionExpirada(from) {
+  if (!sesionesExpiradas.has(from)) {
+    return false;
+  }
+
+  sesionesExpiradas.delete(from);
+  return true;
+}
+
+function consumirSesionUsuarioExpirada(from) {
+  const sesion = obtenerSesionUsuario(from);
+
+  if (!sesion || !sesionExpirada(sesion)) {
+    return false;
+  }
+
+  sesionesUsuarios.delete(from);
+  sesionesCotizacion.delete(from);
+  cancelarExpiracionSesion(from);
+  console.log("[SESION] Expirada", { from });
+
+  return true;
+}
+
+function obtenerSesionCotizacion(from) {
+  return sesionesCotizacion.get(from) || null;
 }
 
 function estaEsperandoAreaCotizacion(from) {
-  return sesionesCotizacion.get(from)?.paso === "esperando_area";
+  return obtenerSesionCotizacion(from)?.paso === "esperando_area";
 }
 
 function estaEsperandoServicioCotizacion(from) {
-  return sesionesCotizacion.get(from)?.paso === "esperando_servicio";
+  return obtenerSesionCotizacion(from)?.paso === "esperando_servicio";
 }
 
 function esNumero(text) {
@@ -332,6 +478,10 @@ function boton(id, title) {
       title
     }
   };
+}
+
+function botonMenuPrincipal() {
+  return boton("main_menu", "🏠 Menú principal");
 }
 
 async function consultarCatalogoServicios() {
@@ -499,7 +649,7 @@ wa.me/593939034743
 }
 
 async function manejarSeleccionAreaCotizacion(from, text) {
-  const sesion = sesionesCotizacion.get(from);
+  const sesion = obtenerSesionCotizacion(from);
   const indiceArea = obtenerIndiceDesdeTexto(text);
   const areaSeleccionada = indiceArea === null ? null : sesion?.areas?.[indiceArea];
 
@@ -542,7 +692,7 @@ async function manejarSeleccionAreaCotizacion(from, text) {
 }
 
 async function manejarSeleccionServicioCotizacion(from, text) {
-  const sesion = sesionesCotizacion.get(from);
+  const sesion = obtenerSesionCotizacion(from);
   const indiceServicio = obtenerIndiceDesdeTexto(text);
   const servicioSeleccionado = indiceServicio === null ? null : sesion?.servicios?.[indiceServicio];
 
@@ -568,7 +718,7 @@ async function manejarSeleccionServicioCotizacion(from, text) {
     timestamp: Date.now()
   });
 
-  await enviarMensajeTexto(from, construirMensajeDetalleServicio(servicioSeleccionado));
+  await enviarMensajeConMenuPrincipal(from, construirMensajeDetalleServicio(servicioSeleccionado));
 }
 
 async function enviarAreasCotizacion(to) {
@@ -639,6 +789,10 @@ async function enviarBotones(to, bodyText, buttons) {
   };
 
   await enviarWhatsApp(payload);
+}
+
+async function enviarMensajeConMenuPrincipal(to, message) {
+  await enviarBotones(to, message, [botonMenuPrincipal()]);
 }
 
 async function enviarMensajeTexto(to, message) {
