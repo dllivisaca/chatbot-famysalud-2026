@@ -11,7 +11,9 @@ const PORT = process.env.PORT || 3000;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const WHATSAPP_API_VERSION = "v20.0";
+const sesionesCotizacion = new Map();
 
 const TEXTOS = {
   menuPrincipal: `Hola 👋 Soy el asistente virtual de FamySALUD.
@@ -158,7 +160,7 @@ wa.me/593939034743
 0939034743
 
 Estaremos encantados de ayudarte 😊` },
-  paciente_cotizar: { type: "text", text: "Cuéntanos qué servicio deseas cotizar y un asesor te apoyará." },
+  paciente_cotizar: { type: "catalog_areas" },
   paciente_mas_opciones_1: { type: "menu", menu: "pacientesMasOpciones1" },
   paciente_resultados: { type: "text", text: "Para solicitar resultados, por favor comparte tus datos con un asesor." },
   paciente_promociones: { type: "text", text: "Pronto te compartiremos nuestras promociones disponibles." },
@@ -188,6 +190,7 @@ Estaremos encantados de ayudarte 😊` },
   alianza_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
   alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." }
 };
+
 
 // Verificacion del webhook requerida por Meta WhatsApp Cloud API.
 app.get("/webhook", (req, res) => {
@@ -259,6 +262,11 @@ async function manejarBoton(to, buttonId) {
     return;
   }
 
+  if (accion.type === "catalog_areas") {
+    await enviarAreasCotizacion(to);
+    return;
+  }
+
   await enviarMensajeTexto(to, accion.text);
 }
 
@@ -290,6 +298,100 @@ function boton(id, title) {
       title
     }
   };
+}
+
+async function consultarCatalogoServicios() {
+  if (!CHATBOT_CATALOG_URL) {
+    throw new Error("CHATBOT_CATALOG_URL no esta configurada.");
+  }
+
+  console.log("[CATALOGO] Consultando endpoint del catalogo.");
+
+  const response = await axios.get(CHATBOT_CATALOG_URL, {
+    timeout: 10000
+  });
+
+  console.log("[CATALOGO] Catalogo recibido:", {
+    status: response.status,
+    areas: Array.isArray(response.data?.areas) ? response.data.areas.length : 0,
+    updated_at: response.data?.updated_at
+  });
+
+  return response.data;
+}
+
+function extraerAreasCatalogo(catalogo) {
+  if (!Array.isArray(catalogo?.areas)) {
+    console.warn("[CATALOGO] La respuesta no contiene un arreglo de areas.");
+    return [];
+  }
+
+  const areasPorTitulo = new Map();
+
+  for (const area of catalogo.areas) {
+    const title = typeof area?.title === "string" ? area.title.trim() : "";
+
+    if (!title || areasPorTitulo.has(title)) {
+      continue;
+    }
+
+    areasPorTitulo.set(title, {
+      id: area.id,
+      title
+    });
+  }
+
+  return Array.from(areasPorTitulo.values());
+}
+
+function construirMensajeAreasCotizacion(areas) {
+  const listadoAreas = areas
+    .map((area, index) => `${index + 1}. ${area.title}`)
+    .join("\n");
+
+  return `Estas son nuestras areas de atencion disponibles para cotizar:
+
+${listadoAreas}
+
+Responde con el numero del area para ver sus servicios.`;
+}
+
+async function enviarAreasCotizacion(to) {
+  try {
+    const catalogo = await consultarCatalogoServicios();
+    const areas = extraerAreasCatalogo(catalogo);
+
+    if (areas.length === 0) {
+      console.warn("[CATALOGO] No se encontraron areas disponibles para cotizar.");
+      await enviarMensajeTexto(to, mensajeErrorCatalogo());
+      return;
+    }
+
+    sesionesCotizacion.set(to, {
+      paso: "esperando_area",
+      areas,
+      timestamp: Date.now()
+    });
+
+    console.log("[CATALOGO] Areas disponibles enviadas:", {
+      to,
+      totalAreas: areas.length
+    });
+
+    await enviarMensajeTexto(to, construirMensajeAreasCotizacion(areas));
+  } catch (error) {
+    console.error("[CATALOGO] Error al cargar catalogo:", {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data
+    });
+
+    await enviarMensajeTexto(to, mensajeErrorCatalogo());
+  }
+}
+
+function mensajeErrorCatalogo() {
+  return "En este momento no pudimos cargar el catalogo de servicios para cotizar. Por favor comunicate con un asesor de FamySALUD y con gusto te ayudaremos.";
 }
 
 async function enviarMenu(to, menuKey) {
