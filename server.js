@@ -21,6 +21,8 @@ const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_
   ? SESSION_TTL_MINUTES
   : 15) * 60 * 1000;
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_OPCIONES_LISTA_WHATSAPP = 10;
+const MAX_TITULO_FILA_LISTA = 24;
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const mensajesProcesados = new Map();
@@ -291,13 +293,15 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const text = extraerTexto(message);
     const buttonId = extraerButtonReplyId(message);
+    const listReplyId = extraerListReplyId(message);
 
     console.log("[MENSAJE] Recibido:", {
       messageId,
       from,
       type: message.type,
       text,
-      buttonId
+      buttonId,
+      listReplyId
     });
 
     const now = Date.now();
@@ -342,6 +346,11 @@ app.post("/webhook", async (req, res) => {
     actualizarSesionUsuario(from);
     if (!teniaSessionId) {
       registrarEvento(from, "session_started", { messageId });
+    }
+
+    if (listReplyId) {
+      await manejarSeleccionListaCotizacion(from, listReplyId, messageId);
+      return res.sendStatus(200);
     }
 
     if (buttonId) {
@@ -594,6 +603,10 @@ function extraerButtonReplyId(message) {
   return message.interactive?.button_reply?.id || "";
 }
 
+function extraerListReplyId(message) {
+  return message.interactive?.list_reply?.id || "";
+}
+
 function boton(id, title) {
   return {
     type: "reply",
@@ -679,6 +692,43 @@ function obtenerIndiceDesdeTexto(text) {
   return numero - 1;
 }
 
+function construirIdListaCotizacion(tipo, index) {
+  return `cot_${tipo}_${index}`;
+}
+
+function obtenerIndiceDesdeListReplyId(listReplyId, tipo) {
+  const prefix = `cot_${tipo}_`;
+
+  if (!listReplyId.startsWith(prefix)) {
+    return null;
+  }
+
+  const index = Number.parseInt(listReplyId.slice(prefix.length), 10);
+  return Number.isInteger(index) && index >= 0 ? index : null;
+}
+
+function obtenerIndiceSeleccionCotizacion(valor, tipo, origen) {
+  if (origen === "list") {
+    return obtenerIndiceDesdeListReplyId(valor, tipo);
+  }
+
+  return obtenerIndiceDesdeTexto(valor);
+}
+
+function puedeUsarListaWhatsApp(opciones) {
+  return Array.isArray(opciones) && opciones.length > 0 && opciones.length <= MAX_OPCIONES_LISTA_WHATSAPP;
+}
+
+function truncarTextoLista(text) {
+  const valor = String(text || "").trim();
+
+  if (valor.length <= MAX_TITULO_FILA_LISTA) {
+    return valor;
+  }
+
+  return valor.slice(0, MAX_TITULO_FILA_LISTA - 1).trimEnd();
+}
+
 function extraerServiciosArea(area) {
   if (!Array.isArray(area?.services)) {
     return [];
@@ -707,6 +757,46 @@ function construirMensajeServiciosCotizacion(area, servicios) {
 ${listadoServicios}
 
 Responde con el numero del servicio que deseas consultar.`;
+}
+
+async function enviarListaAreasCotizacion(to, areas) {
+  await enviarListaWhatsApp(to, "Estas son nuestras areas de atencion disponibles para cotizar:", "Ver areas", [
+    {
+      title: "Areas disponibles",
+      rows: areas.map((area, index) => ({
+        id: construirIdListaCotizacion("area", index),
+        title: truncarTextoLista(area.title)
+      }))
+    }
+  ]);
+
+  registrarEvento(to, "menu_opened", {
+    flowKey: "cotizacion_area",
+    payload: {
+      interactionType: "list",
+      totalOptions: areas.length
+    }
+  });
+}
+
+async function enviarListaServiciosCotizacion(to, area, servicios) {
+  await enviarListaWhatsApp(to, `Estos son los servicios disponibles en ${area.title}:`, "Ver servicios", [
+    {
+      title: "Servicios",
+      rows: servicios.map((servicio, index) => ({
+        id: construirIdListaCotizacion("servicio", index),
+        title: truncarTextoLista(servicio.title)
+      }))
+    }
+  ]);
+
+  registrarEvento(to, "menu_opened", {
+    flowKey: "cotizacion_servicio",
+    payload: {
+      interactionType: "list",
+      totalOptions: servicios.length
+    }
+  });
 }
 
 function formatearPrecio(valor) {
@@ -772,9 +862,30 @@ wa.me/593939034743
   return bloques.join("\n\n");
 }
 
-async function manejarSeleccionAreaCotizacion(from, text, messageId) {
+async function manejarSeleccionListaCotizacion(from, listReplyId, messageId) {
+  if (estaEsperandoAreaCotizacion(from)) {
+    await manejarSeleccionAreaCotizacion(from, listReplyId, messageId, "list");
+    return;
+  }
+
+  if (estaEsperandoServicioCotizacion(from)) {
+    await manejarSeleccionServicioCotizacion(from, listReplyId, messageId, "list");
+    return;
+  }
+
+  registrarEvento(from, "invalid_message", {
+    messageId,
+    payload: {
+      reason: "unexpected_list_reply",
+      listReplyId
+    }
+  });
+  await enviarMenu(from, "principal");
+}
+
+async function manejarSeleccionAreaCotizacion(from, text, messageId, origen = "text") {
   const sesion = obtenerSesionCotizacion(from);
-  const indiceArea = obtenerIndiceDesdeTexto(text);
+  const indiceArea = obtenerIndiceSeleccionCotizacion(text, "area", origen);
   const areaSeleccionada = indiceArea === null ? null : sesion?.areas?.[indiceArea];
 
   if (!areaSeleccionada) {
@@ -788,6 +899,7 @@ async function manejarSeleccionAreaCotizacion(from, text, messageId) {
       flowKey: "cotizacion_area",
       payload: {
         reason: "invalid_area_number",
+        interactionType: origen,
         text,
         totalAreas: sesion?.areas?.length || 0
       }
@@ -805,6 +917,20 @@ async function manejarSeleccionAreaCotizacion(from, text, messageId) {
     totalServicios: servicios.length
   });
 
+  if (origen === "list") {
+    registrarEvento(from, "button_click", {
+      messageId,
+      buttonId: text,
+      flowKey: "cotizacion_area",
+      payload: {
+        interactionType: "list",
+        selectedIndex: indiceArea,
+        areaId: areaSeleccionada.id,
+        areaTitle: areaSeleccionada.title
+      }
+    });
+  }
+
   if (servicios.length === 0) {
     await enviarMensajeTexto(
       from,
@@ -821,12 +947,17 @@ async function manejarSeleccionAreaCotizacion(from, text, messageId) {
     timestamp: Date.now()
   });
 
+  if (puedeUsarListaWhatsApp(servicios)) {
+    await enviarListaServiciosCotizacion(from, areaSeleccionada, servicios);
+    return;
+  }
+
   await enviarMensajeTexto(from, construirMensajeServiciosCotizacion(areaSeleccionada, servicios));
 }
 
-async function manejarSeleccionServicioCotizacion(from, text, messageId) {
+async function manejarSeleccionServicioCotizacion(from, text, messageId, origen = "text") {
   const sesion = obtenerSesionCotizacion(from);
-  const indiceServicio = obtenerIndiceDesdeTexto(text);
+  const indiceServicio = obtenerIndiceSeleccionCotizacion(text, "servicio", origen);
   const servicioSeleccionado = indiceServicio === null ? null : sesion?.servicios?.[indiceServicio];
 
   if (!servicioSeleccionado) {
@@ -840,6 +971,7 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId) {
       flowKey: "cotizacion_servicio",
       payload: {
         reason: "invalid_service_number",
+        interactionType: origen,
         text,
         totalServicios: sesion?.servicios?.length || 0
       }
@@ -853,6 +985,22 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId) {
     servicioId: servicioSeleccionado.id,
     servicioTitle: servicioSeleccionado.title
   });
+
+  if (origen === "list") {
+    registrarEvento(from, "button_click", {
+      messageId,
+      buttonId: text,
+      flowKey: "cotizacion_servicio",
+      payload: {
+        interactionType: "list",
+        selectedIndex: indiceServicio,
+        areaId: sesion?.areaSeleccionada?.id,
+        areaTitle: sesion?.areaSeleccionada?.title,
+        servicioId: servicioSeleccionado.id,
+        servicioTitle: servicioSeleccionado.title
+      }
+    });
+  }
 
   sesionesCotizacion.set(from, {
     ...sesion,
@@ -894,6 +1042,11 @@ async function enviarAreasCotizacion(to) {
       to,
       totalAreas: areas.length
     });
+
+    if (puedeUsarListaWhatsApp(areas)) {
+      await enviarListaAreasCotizacion(to, areas);
+      return;
+    }
 
     await enviarMensajeTexto(to, construirMensajeAreasCotizacion(areas));
   } catch (error) {
@@ -937,6 +1090,26 @@ async function enviarBotones(to, bodyText, buttons) {
       },
       action: {
         buttons
+      }
+    }
+  };
+
+  await enviarWhatsApp(payload);
+}
+
+async function enviarListaWhatsApp(to, bodyText, buttonText, sections) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: {
+        text: bodyText
+      },
+      action: {
+        button: buttonText,
+        sections
       }
     }
   };
