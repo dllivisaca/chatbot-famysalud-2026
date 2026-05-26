@@ -32,6 +32,7 @@ const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
+const sesionesResultados = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
@@ -255,7 +256,7 @@ wa.me/593939034743
 Estaremos encantados de ayudarte 😊` },
   paciente_cotizar: { type: "catalog_areas" },
   paciente_mas_opciones_1: { type: "menu", menu: "pacientesMasOpciones1" },
-  paciente_resultados: { type: "text", text: "Para solicitar resultados, por favor comparte tus datos con un asesor." },
+  paciente_resultados: { type: "results_request" },
   paciente_promociones: { type: "text", text: "Pronto te compartiremos nuestras promociones disponibles." },
   paciente_mas_opciones_2: { type: "menu", menu: "pacientesMasOpciones2" },
   paciente_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para que puedas visitarnos." },
@@ -312,14 +313,16 @@ app.post("/webhook", async (req, res) => {
     const messageId = message.id;
     const from = message.from;
     const text = extraerTexto(message);
+    const rawText = extraerTextoOriginal(message);
     const buttonId = extraerButtonReplyId(message);
     const listReplyId = extraerListReplyId(message);
+    const enFlujoResultados = estaEnFlujoResultados(from);
 
     console.log("[MENSAJE] Recibido:", {
       messageId,
       from,
       type: message.type,
-      text,
+      text: enFlujoResultados ? "[redacted_results_flow]" : text,
       buttonId,
       listReplyId
     });
@@ -366,6 +369,11 @@ app.post("/webhook", async (req, res) => {
     actualizarSesionUsuario(from);
     if (!teniaSessionId) {
       registrarEvento(from, "session_started", { messageId });
+    }
+
+    if (estaEnFlujoResultados(from)) {
+      await manejarFlujoResultados(from, rawText, buttonId, messageId);
+      return res.sendStatus(200);
     }
 
     if (listReplyId) {
@@ -457,6 +465,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "restart_quote") {
     await reiniciarCotizacion(to, messageId);
+    return;
+  }
+
+  if (accion.type === "results_request") {
+    await iniciarSolicitudResultados(to, messageId);
     return;
   }
 
@@ -565,6 +578,253 @@ async function reiniciarCotizacion(from, messageId) {
   await enviarMensajeTexto(from, construirMensajeAreasCotizacion(sesion.areas));
 }
 
+async function iniciarSolicitudResultados(from, messageId) {
+  sesionesCotizacion.delete(from);
+  sesionesResultados.set(from, {
+    paso: "esperando_tipo",
+    datos: {},
+    timestamp: Date.now()
+  });
+
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId: "paciente_resultados",
+    flowKey: "resultados",
+    payload: {
+      action: "results_request_started"
+    }
+  });
+
+  await enviarTipoResultado(from);
+}
+
+function obtenerSesionResultados(from) {
+  return sesionesResultados.get(from) || null;
+}
+
+function estaEnFlujoResultados(from) {
+  return Boolean(obtenerSesionResultados(from));
+}
+
+async function manejarFlujoResultados(from, text, buttonId, messageId) {
+  const sesion = obtenerSesionResultados(from);
+
+  if (!sesion) {
+    await iniciarSolicitudResultados(from, messageId);
+    return;
+  }
+
+  if (sesion.paso === "esperando_tipo") {
+    await manejarTipoResultado(from, text, buttonId, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "esperando_nombre") {
+    await guardarDatoResultadosObligatorio(
+      from,
+      text,
+      messageId,
+      sesion,
+      "nombreCompleto",
+      "esperando_identificacion",
+      "Por favor escribe la cédula o identificación del paciente."
+    );
+    return;
+  }
+
+  if (sesion.paso === "esperando_identificacion") {
+    await guardarDatoResultadosObligatorio(
+      from,
+      text,
+      messageId,
+      sesion,
+      "identificacion",
+      "esperando_fecha_examen",
+      "Por favor escribe la fecha aproximada del examen."
+    );
+    return;
+  }
+
+  if (sesion.paso === "esperando_fecha_examen") {
+    await guardarDatoResultadosObligatorio(
+      from,
+      text,
+      messageId,
+      sesion,
+      "fechaExamen",
+      "esperando_observacion",
+      "Si deseas agregar una observación, escríbela ahora. Si no, responde \"no\"."
+    );
+    return;
+  }
+
+  if (sesion.paso === "esperando_observacion") {
+    await finalizarSolicitudResultados(from, text, messageId, sesion);
+    return;
+  }
+
+  registrarEvento(from, "invalid_message", {
+    messageId,
+    flowKey: "resultados",
+    payload: {
+      reason: "unknown_results_step"
+    }
+  });
+  sesionesResultados.delete(from);
+  await enviarMenu(from, "pacientes");
+}
+
+async function manejarTipoResultado(from, text, buttonId, messageId, sesion) {
+  const tipoResultado = obtenerTipoResultado(buttonId || text);
+
+  if (!tipoResultado) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "resultados",
+      payload: {
+        reason: "invalid_results_type"
+      }
+    });
+    await enviarTipoResultado(from);
+    return;
+  }
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    buttonId: buttonId || null,
+    flowKey: "resultados",
+    payload: {
+      action: "select_results_type",
+      tipoResultado
+    }
+  });
+
+  sesionesResultados.set(from, {
+    ...sesion,
+    paso: "esperando_nombre",
+    datos: {
+      ...sesion.datos,
+      tipoResultado
+    },
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeTexto(from, "Por favor escribe el nombre completo del paciente.");
+}
+
+async function guardarDatoResultadosObligatorio(from, text, messageId, sesion, campo, siguientePaso, siguienteMensaje) {
+  if (!textoValidoResultados(text)) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "resultados",
+      payload: {
+        reason: "missing_required_results_field",
+        step: sesion.paso
+      }
+    });
+    await reenviarPreguntaResultados(from, sesion.paso);
+    return;
+  }
+
+  sesionesResultados.set(from, {
+    ...sesion,
+    paso: siguientePaso,
+    datos: {
+      ...sesion.datos,
+      [campo]: text.trim()
+    },
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeTexto(from, siguienteMensaje);
+}
+
+async function finalizarSolicitudResultados(from, text, messageId, sesion) {
+  const observacion = esObservacionVacia(text) ? "" : text.trim();
+  const datos = {
+    ...sesion.datos,
+    observacion
+  };
+  const hasObservation = Boolean(observacion);
+
+  sesionesResultados.delete(from);
+  await notificarSolicitudResultados(from, datos);
+
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    flowKey: "resultados",
+    payload: {
+      action: "results_request_completed",
+      tipoResultado: datos.tipoResultado,
+      hasObservation
+    }
+  });
+
+  await enviarMensajeConMenuPrincipal(
+    from,
+    "Hemos recibido tu solicitud de resultados. Nuestro equipo revisará la información para gestionar el envío correspondiente."
+  );
+}
+
+function obtenerTipoResultado(valor) {
+  const normalizado = normalizarTextoResultados(valor);
+  const tipos = {
+    resultado_laboratorio: "laboratorio",
+    laboratorio: "laboratorio",
+    resultado_imagen: "imagenologia",
+    imagenologia: "imagenologia",
+    "imagenología": "imagenologia",
+    resultado_otro: "otro",
+    otro: "otro"
+  };
+
+  return tipos[normalizado] || null;
+}
+
+function textoValidoResultados(text) {
+  return Boolean(text && text.trim());
+}
+
+function esObservacionVacia(text) {
+  return ["no", "ninguna", "sin observación", "sin observacion"].includes(normalizarTextoResultados(text));
+}
+
+function normalizarTextoResultados(text) {
+  return String(text || "").trim().toLowerCase();
+}
+
+async function reenviarPreguntaResultados(from, paso) {
+  const preguntas = {
+    esperando_nombre: "Por favor escribe el nombre completo del paciente.",
+    esperando_identificacion: "Por favor escribe la cédula o identificación del paciente.",
+    esperando_fecha_examen: "Por favor escribe la fecha aproximada del examen.",
+    esperando_observacion: "Si deseas agregar una observación, escríbela ahora. Si no, responde \"no\"."
+  };
+
+  if (paso === "esperando_tipo") {
+    await enviarTipoResultado(from);
+    return;
+  }
+
+  await enviarMensajeTexto(from, preguntas[paso] || "Por favor comparte el dato solicitado.");
+}
+
+async function enviarTipoResultado(to) {
+  await enviarBotones(to, "Selecciona el tipo de resultado:", [
+    boton("resultado_laboratorio", "Laboratorio"),
+    boton("resultado_imagen", "Imagenología"),
+    boton("resultado_otro", "Otro")
+  ]);
+}
+
+async function notificarSolicitudResultados(from, datos) {
+  console.log("[RESULTADOS] Solicitud lista para notificación interna", {
+    tipoResultado: datos.tipoResultado,
+    hasObservation: Boolean(datos.observacion),
+    fromHash: hashUsuario(from)
+  });
+}
+
 function debeMostrarMenu(text) {
   if (!text) {
     return true;
@@ -601,6 +861,7 @@ function actualizarSesionUsuario(from, opciones = {}) {
 function limpiarSesionesUsuario(from) {
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
   sesionesExpiradas.delete(from);
   cancelarExpiracionSesion(from);
 }
@@ -634,6 +895,7 @@ async function expirarSesionUsuario(from) {
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
@@ -676,6 +938,7 @@ function consumirSesionUsuarioExpirada(from) {
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
@@ -707,6 +970,10 @@ function extraerMensaje(body) {
 
 function extraerTexto(message) {
   return message.text?.body?.trim().toLowerCase() || "";
+}
+
+function extraerTextoOriginal(message) {
+  return message.text?.body?.trim() || "";
 }
 
 function extraerButtonReplyId(message) {
