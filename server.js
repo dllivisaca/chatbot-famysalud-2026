@@ -126,7 +126,7 @@ const MENUS = {
   principal: {
     text: TEXTOS.menuPrincipal,
     buttons: [
-      boton("main_atenderme", "Quiero atenderme"),
+      boton("main_atenderme", "Soy paciente"),
       // WhatsApp permite maximo 20 caracteres en el titulo del boton.
       boton("main_empresas", "Serv. para empresas"),
       boton("main_mas_opciones", "Más opciones")
