@@ -20,9 +20,10 @@ const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "
 const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
   ? SESSION_TTL_MINUTES
   : 15) * 60 * 1000;
+const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
-const mensajesProcesados = new Set();
+const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 
@@ -62,6 +63,24 @@ function registrarEvento(from, eventType, datos = {}) {
   }).catch((error) => {
     console.error("[EVENTO] Error registrando evento:", error.message);
   });
+}
+
+function purgarMensajesProcesados(now = Date.now()) {
+  for (const [messageId, timestamp] of mensajesProcesados) {
+    if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
+      mensajesProcesados.delete(messageId);
+    }
+  }
+}
+
+function mensajeYaProcesado(messageId) {
+  return Boolean(messageId && mensajesProcesados.has(messageId));
+}
+
+function marcarMensajeProcesado(messageId, now = Date.now()) {
+  if (messageId) {
+    mensajesProcesados.set(messageId, now);
+  }
 }
 
 const TEXTOS = {
@@ -281,14 +300,15 @@ app.post("/webhook", async (req, res) => {
       buttonId
     });
 
-    if (messageId && mensajesProcesados.has(messageId)) {
+    const now = Date.now();
+    purgarMensajesProcesados(now);
+
+    if (mensajeYaProcesado(messageId)) {
       console.log("[MENSAJE] Duplicado ignorado:", { messageId, from });
       return res.sendStatus(200);
     }
 
-    if (messageId) {
-      mensajesProcesados.add(messageId);
-    }
+    marcarMensajeProcesado(messageId, now);
 
     const teniaSesionActiva = sesionUsuarioActiva(from);
     const teniaSessionId = Boolean(obtenerSessionId(from));
