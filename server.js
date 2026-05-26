@@ -2,6 +2,8 @@ require("dotenv").config();
 
 const express = require("express");
 const axios = require("axios");
+const crypto = require("crypto");
+const { insertarEvento } = require("./db");
 
 const app = express();
 
@@ -12,6 +14,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
+const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const WHATSAPP_API_VERSION = "v20.0";
 const SESION_USUARIO_TTL_MS = 5 * 1000;
 const sesionesUsuarios = new Map();
@@ -19,6 +22,31 @@ const sesionesCotizacion = new Map();
 const mensajesProcesados = new Set();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
+
+function hashUsuario(from) {
+  return crypto
+    .createHash("sha256")
+    .update(`${EVENT_HASH_SALT}:${from}`)
+    .digest("hex");
+}
+
+function registrarEvento(from, eventType, datos = {}) {
+  if (!from) {
+    return;
+  }
+
+  insertarEvento({
+    event_type: eventType,
+    user_hash: hashUsuario(from),
+    message_id: datos.messageId,
+    button_id: datos.buttonId,
+    menu_key: datos.menuKey,
+    flow_key: datos.flowKey,
+    payload: datos.payload
+  }).catch((error) => {
+    console.error("[EVENTO] Error registrando evento:", error.message);
+  });
+}
 
 const TEXTOS = {
   menuPrincipal: `Hola 👋 Soy el asistente virtual de FamySALUD.
@@ -246,9 +274,14 @@ app.post("/webhook", async (req, res) => {
       mensajesProcesados.add(messageId);
     }
 
+    const teniaSesionActiva = sesionUsuarioActiva(from);
+
     if (debeResetearConversacion(text)) {
       limpiarSesionesUsuario(from);
       actualizarSesionUsuario(from);
+      if (!teniaSesionActiva) {
+        registrarEvento(from, "session_started", { messageId });
+      }
       await enviarMenu(from, "principal");
       return res.sendStatus(200);
     }
@@ -270,19 +303,22 @@ app.post("/webhook", async (req, res) => {
     }
 
     actualizarSesionUsuario(from);
+    if (!teniaSesionActiva) {
+      registrarEvento(from, "session_started", { messageId });
+    }
 
     if (buttonId) {
-      await manejarBoton(from, buttonId);
+      await manejarBoton(from, buttonId, messageId);
       return res.sendStatus(200);
     }
 
     if (estaEsperandoAreaCotizacion(from)) {
-      await manejarSeleccionAreaCotizacion(from, text);
+      await manejarSeleccionAreaCotizacion(from, text, messageId);
       return res.sendStatus(200);
     }
 
     if (estaEsperandoServicioCotizacion(from)) {
-      await manejarSeleccionServicioCotizacion(from, text);
+      await manejarSeleccionServicioCotizacion(from, text, messageId);
       return res.sendStatus(200);
     }
 
@@ -291,6 +327,13 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      payload: {
+        reason: "fallback_to_main_menu",
+        messageType: message.type
+      }
+    });
     await enviarMenu(from, "principal");
     return res.sendStatus(200);
   } catch (error) {
@@ -299,11 +342,26 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-async function manejarBoton(to, buttonId) {
+async function manejarBoton(to, buttonId, messageId) {
   const accion = ACCIONES_BOTONES[buttonId];
+
+  registrarEvento(to, "button_click", {
+    messageId,
+    buttonId,
+    payload: {
+      actionType: accion?.type || null
+    }
+  });
 
   if (!accion) {
     console.warn("[BOTON] ID no reconocido:", buttonId);
+    registrarEvento(to, "invalid_message", {
+      messageId,
+      buttonId,
+      payload: {
+        reason: "unknown_button"
+      }
+    });
     await enviarMenu(to, "principal");
     return;
   }
@@ -328,10 +386,26 @@ async function manejarBoton(to, buttonId) {
   }
 
   if (accion.type === "text_with_main_menu") {
+    registrarEvento(to, "flow_completed", {
+      messageId,
+      buttonId,
+      flowKey: buttonId,
+      payload: {
+        actionType: accion.type
+      }
+    });
     await enviarMensajeConMenuPrincipal(to, accion.text);
     return;
   }
 
+  registrarEvento(to, "flow_completed", {
+    messageId,
+    buttonId,
+    flowKey: buttonId,
+    payload: {
+      actionType: accion.type
+    }
+  });
   await enviarMensajeTexto(to, accion.text);
 }
 
@@ -401,6 +475,7 @@ async function expirarSesionUsuario(from) {
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
+  registrarEvento(from, "session_expired");
 
   try {
     await enviarMensajeTexto(
@@ -438,6 +513,7 @@ function consumirSesionUsuarioExpirada(from) {
   sesionesCotizacion.delete(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
+  registrarEvento(from, "session_expired");
 
   return true;
 }
@@ -648,7 +724,7 @@ wa.me/593939034743
   return bloques.join("\n\n");
 }
 
-async function manejarSeleccionAreaCotizacion(from, text) {
+async function manejarSeleccionAreaCotizacion(from, text, messageId) {
   const sesion = obtenerSesionCotizacion(from);
   const indiceArea = obtenerIndiceDesdeTexto(text);
   const areaSeleccionada = indiceArea === null ? null : sesion?.areas?.[indiceArea];
@@ -658,6 +734,15 @@ async function manejarSeleccionAreaCotizacion(from, text) {
       from,
       text,
       totalAreas: sesion?.areas?.length || 0
+    });
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "cotizacion_area",
+      payload: {
+        reason: "invalid_area_number",
+        text,
+        totalAreas: sesion?.areas?.length || 0
+      }
     });
     await enviarMensajeTexto(from, "Por favor selecciona un numero valido del listado.");
     return;
@@ -691,7 +776,7 @@ async function manejarSeleccionAreaCotizacion(from, text) {
   await enviarMensajeTexto(from, construirMensajeServiciosCotizacion(areaSeleccionada, servicios));
 }
 
-async function manejarSeleccionServicioCotizacion(from, text) {
+async function manejarSeleccionServicioCotizacion(from, text, messageId) {
   const sesion = obtenerSesionCotizacion(from);
   const indiceServicio = obtenerIndiceDesdeTexto(text);
   const servicioSeleccionado = indiceServicio === null ? null : sesion?.servicios?.[indiceServicio];
@@ -701,6 +786,15 @@ async function manejarSeleccionServicioCotizacion(from, text) {
       from,
       text,
       totalServicios: sesion?.servicios?.length || 0
+    });
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "cotizacion_servicio",
+      payload: {
+        reason: "invalid_service_number",
+        text,
+        totalServicios: sesion?.servicios?.length || 0
+      }
     });
     await enviarMensajeTexto(from, "Por favor selecciona un numero valido del listado de servicios.");
     return;
@@ -718,6 +812,16 @@ async function manejarSeleccionServicioCotizacion(from, text) {
     timestamp: Date.now()
   });
 
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    flowKey: "cotizacion",
+    payload: {
+      areaId: sesion?.areaSeleccionada?.id,
+      areaTitle: sesion?.areaSeleccionada?.title,
+      servicioId: servicioSeleccionado.id,
+      servicioTitle: servicioSeleccionado.title
+    }
+  });
   await enviarMensajeConMenuPrincipal(from, construirMensajeDetalleServicio(servicioSeleccionado));
 }
 
@@ -770,6 +874,7 @@ async function enviarMenu(to, menuKey) {
 
   console.log("[MENU] Enviando:", menuKey);
   await enviarBotones(to, menu.text, menu.buttons);
+  registrarEvento(to, "menu_opened", { menuKey });
 }
 
 async function enviarBotones(to, bodyText, buttons) {
