@@ -1685,10 +1685,11 @@ async function enviarMensajeConMenuPrincipal(to, message) {
 async function enviarPromociones(to) {
   await enviarBotones(
     to,
-    `🎉 Promociones FamySALUD
+    `🎉 ¡Tenemos promociones para ti!
 
-Conoce nuestras promociones, descuentos y campañas disponibles para pacientes.
+En FamySALUD contamos con promociones y campañas especiales en diferentes servicios médicos para nuestros pacientes 💙
 
+Puedes revisarlas aquí:
 ${PROMOCIONES_URL}`,
     [botonMenuPrincipal()]
   );
