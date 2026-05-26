@@ -15,6 +15,9 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
+const APP_ENV = process.env.APP_ENV || "production";
+const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
+const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
 const WHATSAPP_API_VERSION = "v20.0";
 const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "15", 10);
 const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
@@ -34,6 +37,18 @@ const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 let catalogoServiciosCache = null;
 let catalogoServiciosCacheTimestamp = 0;
+
+function flagActiva(value) {
+  return String(value || "").trim().toLowerCase() === "true";
+}
+
+function esProduccion() {
+  return APP_ENV === "production";
+}
+
+function featureHabilitada(flag) {
+  return flag === true;
+}
 
 function hashUsuario(from) {
   return crypto
@@ -1191,4 +1206,7 @@ async function enviarWhatsApp(payload) {
 
 app.listen(PORT, () => {
   console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`);
+  console.log(`[CONFIG] Entorno: ${APP_ENV}`);
+  console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
+  console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
 });
