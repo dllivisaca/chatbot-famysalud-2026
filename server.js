@@ -30,6 +30,18 @@ function hashUsuario(from) {
     .digest("hex");
 }
 
+function generarSessionId() {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function obtenerSessionId(from) {
+  return obtenerSesionUsuario(from)?.sessionId || null;
+}
+
 function registrarEvento(from, eventType, datos = {}) {
   if (!from) {
     return;
@@ -38,6 +50,7 @@ function registrarEvento(from, eventType, datos = {}) {
   insertarEvento({
     event_type: eventType,
     user_hash: hashUsuario(from),
+    session_id: datos.sessionId || obtenerSessionId(from),
     message_id: datos.messageId,
     button_id: datos.buttonId,
     menu_key: datos.menuKey,
@@ -275,6 +288,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     const teniaSesionActiva = sesionUsuarioActiva(from);
+    const teniaSessionId = Boolean(obtenerSessionId(from));
 
     if (debeResetearConversacion(text)) {
       limpiarSesionesUsuario(from);
@@ -287,7 +301,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (consumirMarcaSesionExpirada(from)) {
-      actualizarSesionUsuario(from);
+      actualizarSesionUsuario(from, { generarNuevaSesion: false });
       await enviarMenu(from, "principal");
       return res.sendStatus(200);
     }
@@ -298,12 +312,12 @@ app.post("/webhook", async (req, res) => {
         "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
       );
       await enviarMenu(from, "principal");
-      actualizarSesionUsuario(from);
+      actualizarSesionUsuario(from, { generarNuevaSesion: false });
       return res.sendStatus(200);
     }
 
     actualizarSesionUsuario(from);
-    if (!teniaSesionActiva) {
+    if (!teniaSessionId) {
       registrarEvento(from, "session_started", { messageId });
     }
 
@@ -429,9 +443,14 @@ function obtenerSesionUsuario(from) {
   return sesionesUsuarios.get(from) || null;
 }
 
-function actualizarSesionUsuario(from) {
+function actualizarSesionUsuario(from, opciones = {}) {
+  const { generarNuevaSesion = true } = opciones;
+  const sesionActual = obtenerSesionUsuario(from);
+  const sessionId = sesionActual?.sessionId || (generarNuevaSesion ? generarSessionId() : null);
+
   sesionesUsuarios.set(from, {
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    sessionId
   });
   sesionesExpiradas.delete(from);
   programarExpiracionSesion(from);
@@ -470,12 +489,15 @@ async function expirarSesionUsuario(from) {
     return;
   }
 
+  const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
-  registrarEvento(from, "session_expired");
+  if (sessionId) {
+    registrarEvento(from, "session_expired", { sessionId });
+  }
 
   try {
     await enviarMensajeTexto(
@@ -509,11 +531,14 @@ function consumirSesionUsuarioExpirada(from) {
     return false;
   }
 
+  const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
-  registrarEvento(from, "session_expired");
+  if (sessionId) {
+    registrarEvento(from, "session_expired", { sessionId });
+  }
 
   return true;
 }
