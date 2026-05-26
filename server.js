@@ -226,6 +226,7 @@ const ACCIONES_BOTONES = {
   main_proveedor: { type: "menu", menu: "proveedores" },
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text", text: TEXTOS.trabaja },
+  volver_cotizar: { type: "restart_quote" },
 
   paciente_agendar_cita: { type: "appointment_booking", text: `¡Perfecto! 💙
 
@@ -454,6 +455,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "restart_quote") {
+    await reiniciarCotizacion(to, messageId);
+    return;
+  }
+
   if (accion.type === "appointment_booking") {
     if (!featureHabilitada(ENABLE_APPOINTMENT_BOOKING)) {
       registrarEvento(to, "flow_completed", {
@@ -526,6 +532,37 @@ async function manejarRespuestaIA(from, text, messageId) {
   });
 
   await enviarMenu(from, "principal");
+}
+
+async function reiniciarCotizacion(from, messageId) {
+  const sesion = obtenerSesionCotizacion(from);
+
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId: "volver_cotizar",
+    flowKey: "cotizacion",
+    payload: {
+      action: "restart_quote"
+    }
+  });
+
+  if (!sesion?.areas?.length) {
+    await enviarMenu(from, "pacientes");
+    return;
+  }
+
+  sesionesCotizacion.set(from, {
+    paso: "esperando_area",
+    areas: sesion.areas,
+    timestamp: Date.now()
+  });
+
+  if (puedeUsarListaWhatsApp(sesion.areas)) {
+    await enviarListaAreasCotizacion(from, sesion.areas);
+    return;
+  }
+
+  await enviarMensajeTexto(from, construirMensajeAreasCotizacion(sesion.areas));
 }
 
 function debeMostrarMenu(text) {
@@ -694,6 +731,10 @@ function botonMenuPrincipal() {
   return boton("main_menu", "🏠 Menú principal");
 }
 
+function botonVolverCotizar() {
+  return boton("volver_cotizar", "Volver a cotizar");
+}
+
 async function consultarCatalogoServicios() {
   if (!CHATBOT_CATALOG_URL) {
     throw new Error("CHATBOT_CATALOG_URL no esta configurada.");
@@ -797,6 +838,14 @@ function construirIdListaCotizacion(tipo, index) {
   return `cot_${tipo}_${index}`;
 }
 
+function construirIdVolverServicioCotizacion() {
+  return "cot_servicio_back";
+}
+
+function esIdVolverServicioCotizacion(listReplyId) {
+  return listReplyId === construirIdVolverServicioCotizacion();
+}
+
 function obtenerIndiceDesdeListReplyId(listReplyId, tipo) {
   const prefix = `cot_${tipo}_`;
 
@@ -861,13 +910,15 @@ Responde con el numero del servicio que deseas consultar.`;
 }
 
 async function enviarListaAreasCotizacion(to, areas) {
+  const rows = areas.map((area, index) => ({
+    id: construirIdListaCotizacion("area", index),
+    title: truncarTextoLista(area.title)
+  }));
+
   await enviarListaWhatsApp(to, "Estas son nuestras areas de atencion disponibles para cotizar:", "Ver areas", [
     {
       title: "Areas disponibles",
-      rows: areas.map((area, index) => ({
-        id: construirIdListaCotizacion("area", index),
-        title: truncarTextoLista(area.title)
-      }))
+      rows
     }
   ]);
 
@@ -881,13 +932,22 @@ async function enviarListaAreasCotizacion(to, areas) {
 }
 
 async function enviarListaServiciosCotizacion(to, area, servicios) {
+  const rows = servicios.map((servicio, index) => ({
+    id: construirIdListaCotizacion("servicio", index),
+    title: truncarTextoLista(servicio.title)
+  }));
+
+  if (servicios.length <= MAX_OPCIONES_LISTA_WHATSAPP - 1) {
+    rows.push({
+      id: construirIdVolverServicioCotizacion(),
+      title: "Volver atrás"
+    });
+  }
+
   await enviarListaWhatsApp(to, `Estos son los servicios disponibles en ${area.title}:`, "Ver servicios", [
     {
       title: "Servicios",
-      rows: servicios.map((servicio, index) => ({
-        id: construirIdListaCotizacion("servicio", index),
-        title: truncarTextoLista(servicio.title)
-      }))
+      rows
     }
   ]);
 
@@ -964,6 +1024,11 @@ wa.me/593939034743
 }
 
 async function manejarSeleccionListaCotizacion(from, listReplyId, messageId) {
+  if (esIdVolverServicioCotizacion(listReplyId)) {
+    await volverDesdeServiciosCotizacion(from, messageId);
+    return;
+  }
+
   if (estaEsperandoAreaCotizacion(from)) {
     await manejarSeleccionAreaCotizacion(from, listReplyId, messageId, "list");
     return;
@@ -982,6 +1047,39 @@ async function manejarSeleccionListaCotizacion(from, listReplyId, messageId) {
     }
   });
   await enviarMenu(from, "principal");
+}
+
+async function volverDesdeServiciosCotizacion(from, messageId) {
+  const sesion = obtenerSesionCotizacion(from);
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    buttonId: construirIdVolverServicioCotizacion(),
+    flowKey: "cotizacion_servicio",
+    payload: {
+      action: "back",
+      to: "cotizacion_area"
+    }
+  });
+
+  if (!sesion?.areas?.length) {
+    sesionesCotizacion.delete(from);
+    await enviarMenu(from, "pacientes");
+    return;
+  }
+
+  sesionesCotizacion.set(from, {
+    paso: "esperando_area",
+    areas: sesion.areas,
+    timestamp: Date.now()
+  });
+
+  if (puedeUsarListaWhatsApp(sesion.areas)) {
+    await enviarListaAreasCotizacion(from, sesion.areas);
+    return;
+  }
+
+  await enviarMensajeTexto(from, construirMensajeAreasCotizacion(sesion.areas));
 }
 
 async function manejarSeleccionAreaCotizacion(from, text, messageId, origen = "text") {
@@ -1119,7 +1217,7 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId, origen 
       servicioTitle: servicioSeleccionado.title
     }
   });
-  await enviarMensajeConMenuPrincipal(from, construirMensajeDetalleServicio(servicioSeleccionado));
+  await enviarDetalleServicioConOpciones(from, construirMensajeDetalleServicio(servicioSeleccionado));
 }
 
 async function enviarAreasCotizacion(to) {
@@ -1220,6 +1318,10 @@ async function enviarListaWhatsApp(to, bodyText, buttonText, sections) {
 
 async function enviarMensajeConMenuPrincipal(to, message) {
   await enviarBotones(to, message, [botonMenuPrincipal()]);
+}
+
+async function enviarDetalleServicioConOpciones(to, message) {
+  await enviarBotones(to, message, [botonVolverCotizar(), botonMenuPrincipal()]);
 }
 
 async function enviarMensajeTexto(to, message) {
