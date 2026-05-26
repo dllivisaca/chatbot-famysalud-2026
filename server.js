@@ -3,6 +3,8 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const nodemailer = require("nodemailer");
 const { insertarEvento } = require("./db");
 
@@ -40,6 +42,13 @@ const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
 const PROMOCIONES_URL = "https://famysalud.com.ec/promociones";
+const UBICACION_FAMYSALUD = {
+  name: "Centro Médico FamySALUD",
+  address: "Quisquis 1109 y José Mascote\nGuayaquil, Ecuador",
+  latitude: -2.1872404,
+  longitude: -79.8918589,
+  croquisPath: path.join("assets", "img", "ubicacion-famysalud.png")
+};
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const sesionesResultados = new Map();
@@ -269,7 +278,7 @@ Estaremos encantados de ayudarte 😊` },
   paciente_resultados: { type: "results_request" },
   paciente_promociones: { type: "promotions" },
   paciente_mas_opciones_2: { type: "menu", menu: "pacientesMasOpciones2" },
-  paciente_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para que puedas visitarnos." },
+  paciente_ubicacion: { type: "patient_location" },
   paciente_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
   paciente_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de FamySALUD." },
 
@@ -485,6 +494,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "promotions") {
     await enviarPromociones(to);
+    return;
+  }
+
+  if (accion.type === "patient_location") {
+    await enviarUbicacionPaciente(to);
     return;
   }
 
@@ -1678,6 +1692,70 @@ async function enviarListaWhatsApp(to, bodyText, buttonText, sections) {
   await enviarWhatsApp(payload);
 }
 
+async function enviarUbicacionWhatsApp(to, ubicacion) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "location",
+    location: {
+      latitude: ubicacion.latitude,
+      longitude: ubicacion.longitude,
+      name: ubicacion.name,
+      address: ubicacion.address
+    }
+  };
+
+  await enviarWhatsApp(payload);
+}
+
+async function subirMediaWhatsAppDesdeArchivo(relativePath, mimeType) {
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+    console.warn("[CONFIG] Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID para subir media.");
+    return null;
+  }
+
+  if (typeof FormData === "undefined" || typeof Blob === "undefined") {
+    throw new Error("FormData o Blob no estan disponibles en esta version de Node.js.");
+  }
+
+  const absolutePath = path.resolve(__dirname, relativePath);
+  const fileBuffer = await fs.promises.readFile(absolutePath);
+  const formData = new FormData();
+  formData.append("messaging_product", "whatsapp");
+  formData.append("file", new Blob([fileBuffer], { type: mimeType }), path.basename(absolutePath));
+
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${PHONE_NUMBER_ID}/media`;
+  const response = await axios.post(url, formData, {
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`
+    }
+  });
+
+  return response.data?.id || null;
+}
+
+async function enviarImagenLocalWhatsApp(to, relativePath, caption) {
+  try {
+    const mediaId = await subirMediaWhatsAppDesdeArchivo(relativePath, "image/png");
+
+    if (!mediaId) {
+      return;
+    }
+
+    await enviarWhatsApp({
+      messaging_product: "whatsapp",
+      to,
+      type: "image",
+      image: {
+        id: mediaId,
+        caption
+      }
+    });
+  } catch (error) {
+    console.warn("[MEDIA] No se pudo enviar imagen local:", error.message);
+  }
+}
+
 async function enviarMensajeConMenuPrincipal(to, message) {
   await enviarBotones(to, message, [botonMenuPrincipal()]);
 }
@@ -1693,6 +1771,24 @@ Puedes revisarlas aquí:
 ${PROMOCIONES_URL}`,
     [botonMenuPrincipal()]
   );
+}
+
+async function enviarUbicacionPaciente(to) {
+  await enviarMensajeTexto(
+    to,
+    `📍 ¡Será un gusto recibirte en FamySALUD!
+
+Nos encontramos ubicados en:
+
+Quisquis 1109 y José Mascote
+Guayaquil, Ecuador
+
+Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
+  );
+
+  await enviarUbicacionWhatsApp(to, UBICACION_FAMYSALUD);
+  await enviarImagenLocalWhatsApp(to, UBICACION_FAMYSALUD.croquisPath, "🗺️ Croquis de referencia");
+  await enviarBotones(to, "¿Necesitas algo más? Puedes volver al menú principal.", [botonMenuPrincipal()]);
 }
 
 async function enviarDetalleServicioConOpciones(to, message) {
