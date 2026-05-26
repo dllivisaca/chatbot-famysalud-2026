@@ -16,7 +16,10 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const WHATSAPP_API_VERSION = "v20.0";
-const SESION_USUARIO_TTL_MS = 5 * 1000;
+const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "15", 10);
+const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
+  ? SESSION_TTL_MINUTES
+  : 15) * 60 * 1000;
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const mensajesProcesados = new Set();
