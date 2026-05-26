@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const { insertarEvento } = require("./db");
 
 const app = express();
@@ -18,6 +19,14 @@ const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
+const INTERNAL_RESULTS_WHATSAPP_TO = process.env.INTERNAL_RESULTS_WHATSAPP_TO;
+const RESULTS_INTERNAL_EMAIL = process.env.RESULTS_INTERNAL_EMAIL;
+const RESULTS_EMAIL_FROM = process.env.RESULTS_EMAIL_FROM;
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number.parseInt(process.env.SMTP_PORT || "587", 10);
+const SMTP_SECURE = flagActiva(process.env.SMTP_SECURE);
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
 const WHATSAPP_API_VERSION = "v20.0";
 const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "15", 10);
 const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
@@ -818,10 +827,90 @@ async function enviarTipoResultado(to) {
 }
 
 async function notificarSolicitudResultados(from, datos) {
-  console.log("[RESULTADOS] Solicitud lista para notificación interna", {
+  const message = construirMensajeInternoResultados(from, datos);
+  const subject = "Nueva solicitud de resultados - Paciente";
+  const resultados = await Promise.allSettled([
+    enviarWhatsAppInternoResultados(message),
+    enviarCorreoInternoResultados(subject, message)
+  ]);
+  const whatsappStatus = resultados[0].status;
+  const emailStatus = resultados[1].status;
+
+  resultados.forEach((resultado, index) => {
+    if (resultado.status === "rejected") {
+      console.warn("[RESULTADOS] Error en notificación interna", {
+        channel: index === 0 ? "whatsapp" : "email",
+        tipoResultado: datos.tipoResultado,
+        hasObservation: Boolean(datos.observacion),
+        fromHash: hashUsuario(from),
+        message: resultado.reason?.message
+      });
+    }
+  });
+
+  console.log("[RESULTADOS] Notificación interna procesada", {
     tipoResultado: datos.tipoResultado,
     hasObservation: Boolean(datos.observacion),
-    fromHash: hashUsuario(from)
+    fromHash: hashUsuario(from),
+    whatsappStatus,
+    emailStatus
+  });
+}
+
+function construirMensajeInternoResultados(from, datos) {
+  return [
+    "Nueva solicitud de resultados",
+    "",
+    "Tipo de solicitante: Paciente",
+    "Origen: Chatbot WhatsApp FamySALUD",
+    `Tipo de resultado: ${datos.tipoResultado}`,
+    `Nombre del paciente: ${datos.nombreCompleto}`,
+    `Identificación: ${datos.identificacion}`,
+    `Fecha aproximada del examen: ${datos.fechaExamen}`,
+    `Observación: ${datos.observacion || "Sin observación"}`,
+    `WhatsApp del paciente: ${from}`,
+    "",
+    "Acción requerida: Revisar la información y gestionar manualmente el envío de resultados al paciente."
+  ].join("\n");
+}
+
+async function enviarWhatsAppInternoResultados(message) {
+  if (!INTERNAL_RESULTS_WHATSAPP_TO) {
+    throw new Error("INTERNAL_RESULTS_WHATSAPP_TO no está configurado.");
+  }
+
+  await enviarWhatsApp({
+    messaging_product: "whatsapp",
+    to: INTERNAL_RESULTS_WHATSAPP_TO,
+    type: "text",
+    text: {
+      body: message
+    }
+  });
+}
+
+async function enviarCorreoInternoResultados(subject, message) {
+  if (!RESULTS_INTERNAL_EMAIL || !RESULTS_EMAIL_FROM || !SMTP_HOST) {
+    throw new Error("Configuración SMTP incompleta.");
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number.isInteger(SMTP_PORT) ? SMTP_PORT : 587,
+    secure: SMTP_SECURE,
+    auth: SMTP_USER && SMTP_PASSWORD
+      ? {
+          user: SMTP_USER,
+          pass: SMTP_PASSWORD
+        }
+      : undefined
+  });
+
+  await transporter.sendMail({
+    from: RESULTS_EMAIL_FROM,
+    to: RESULTS_INTERNAL_EMAIL,
+    subject,
+    text: message
   });
 }
 
