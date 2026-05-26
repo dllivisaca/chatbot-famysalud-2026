@@ -227,7 +227,7 @@ const ACCIONES_BOTONES = {
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text", text: TEXTOS.trabaja },
 
-  paciente_agendar_cita: { type: "text", text: `¡Perfecto! 💙
+  paciente_agendar_cita: { type: "appointment_booking", text: `¡Perfecto! 💙
 
 Puedes agendar tu cita de forma rápida desde nuestra aplicación web:
 
@@ -282,8 +282,6 @@ Estaremos encantados de ayudarte 😊` },
   alianza_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
   alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." }
 };
-
-ACCIONES_BOTONES.paciente_agendar_cita.type = "text_with_main_menu";
 
 // Verificacion del webhook requerida por Meta WhatsApp Cloud API.
 app.get("/webhook", (req, res) => {
@@ -452,6 +450,25 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "appointment_booking") {
+    if (!featureHabilitada(ENABLE_APPOINTMENT_BOOKING)) {
+      registrarEvento(to, "flow_completed", {
+        messageId,
+        buttonId,
+        flowKey: buttonId,
+        payload: {
+          actionType: accion.type,
+          enabled: false
+        }
+      });
+      await enviarMensajeConMenuPrincipal(to, accion.text);
+      return;
+    }
+
+    await manejarAgendamientoCita(to, messageId);
+    return;
+  }
+
   if (accion.type === "text_with_main_menu") {
     registrarEvento(to, "flow_completed", {
       messageId,
@@ -474,6 +491,23 @@ async function manejarBoton(to, buttonId, messageId) {
     }
   });
   await enviarMensajeTexto(to, accion.text);
+}
+
+async function manejarAgendamientoCita(to, messageId) {
+  const accion = ACCIONES_BOTONES.paciente_agendar_cita;
+
+  registrarEvento(to, "flow_completed", {
+    messageId,
+    buttonId: "paciente_agendar_cita",
+    flowKey: "paciente_agendar_cita",
+    payload: {
+      actionType: accion.type,
+      enabled: true,
+      stub: true
+    }
+  });
+
+  await enviarMensajeConMenuPrincipal(to, accion.text);
 }
 
 function debeMostrarMenu(text) {
