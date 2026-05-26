@@ -20,6 +20,10 @@ const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "
 const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
   ? SESSION_TTL_MINUTES
   : 15) * 60 * 1000;
+const CATALOG_CACHE_TTL_MINUTES = Number.parseInt(process.env.CATALOG_CACHE_TTL_MINUTES || "10", 10);
+const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CATALOG_CACHE_TTL_MINUTES > 0
+  ? CATALOG_CACHE_TTL_MINUTES
+  : 10) * 60 * 1000;
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
@@ -28,6 +32,8 @@ const sesionesCotizacion = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
+let catalogoServiciosCache = null;
+let catalogoServiciosCacheTimestamp = 0;
 
 function hashUsuario(from) {
   return crypto
@@ -626,19 +632,47 @@ async function consultarCatalogoServicios() {
     throw new Error("CHATBOT_CATALOG_URL no esta configurada.");
   }
 
-  console.log("[CATALOGO] Consultando endpoint del catalogo.");
+  const now = Date.now();
 
-  const response = await axios.get(CHATBOT_CATALOG_URL, {
-    timeout: 10000
-  });
+  if (catalogoServiciosCache && now - catalogoServiciosCacheTimestamp <= CATALOG_CACHE_TTL_MS) {
+    console.log("[CATALOGO] Usando cache", {
+      ageMs: now - catalogoServiciosCacheTimestamp
+    });
+    return catalogoServiciosCache;
+  }
 
-  console.log("[CATALOGO] Catalogo recibido:", {
-    status: response.status,
-    areas: Array.isArray(response.data?.areas) ? response.data.areas.length : 0,
-    updated_at: response.data?.updated_at
-  });
+  try {
+    console.log("[CATALOGO] Consultando API.");
 
-  return response.data;
+    const response = await axios.get(CHATBOT_CATALOG_URL, {
+      timeout: 10000
+    });
+
+    catalogoServiciosCache = response.data;
+    catalogoServiciosCacheTimestamp = Date.now();
+
+    console.log("[CATALOGO] Catalogo recibido:", {
+      status: response.status,
+      areas: Array.isArray(response.data?.areas) ? response.data.areas.length : 0,
+      updated_at: response.data?.updated_at
+    });
+
+    return response.data;
+  } catch (error) {
+    if (catalogoServiciosCache) {
+      console.warn("[CATALOGO] Usando cache anterior por error", {
+        message: error.message,
+        status: error.response?.status
+      });
+      return catalogoServiciosCache;
+    }
+
+    console.error("[CATALOGO] Error sin cache disponible", {
+      message: error.message,
+      status: error.response?.status
+    });
+    throw error;
+  }
 }
 
 function extraerAreasCatalogo(catalogo) {
