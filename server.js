@@ -39,6 +39,7 @@ const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CAT
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
+const PROMOCIONES_URL = "https://famysalud.com.ec/promociones";
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const sesionesResultados = new Map();
@@ -266,7 +267,7 @@ Estaremos encantados de ayudarte 😊` },
   paciente_cotizar: { type: "catalog_areas" },
   paciente_mas_opciones_1: { type: "menu", menu: "pacientesMasOpciones1" },
   paciente_resultados: { type: "results_request" },
-  paciente_promociones: { type: "text", text: "Pronto te compartiremos nuestras promociones disponibles." },
+  paciente_promociones: { type: "promotions" },
   paciente_mas_opciones_2: { type: "menu", menu: "pacientesMasOpciones2" },
   paciente_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para que puedas visitarnos." },
   paciente_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
@@ -479,6 +480,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "results_request") {
     await iniciarSolicitudResultados(to, messageId);
+    return;
+  }
+
+  if (accion.type === "promotions") {
+    await enviarPromociones(to);
     return;
   }
 
@@ -1674,6 +1680,18 @@ async function enviarListaWhatsApp(to, bodyText, buttonText, sections) {
 
 async function enviarMensajeConMenuPrincipal(to, message) {
   await enviarBotones(to, message, [botonMenuPrincipal()]);
+}
+
+async function enviarPromociones(to) {
+  await enviarBotones(
+    to,
+    `🎉 Promociones FamySALUD
+
+Conoce nuestras promociones, descuentos y campañas disponibles para pacientes.
+
+${PROMOCIONES_URL}`,
+    [botonMenuPrincipal()]
+  );
 }
 
 async function enviarDetalleServicioConOpciones(to, message) {
