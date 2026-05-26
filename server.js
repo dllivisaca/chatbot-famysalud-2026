@@ -279,7 +279,14 @@ Estaremos encantados de ayudarte 😊` },
   paciente_promociones: { type: "promotions" },
   paciente_mas_opciones_2: { type: "menu", menu: "pacientesMasOpciones2" },
   paciente_ubicacion: { type: "patient_location" },
-  paciente_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
+  paciente_horarios: { type: "text_with_main_menu", text: `🕒 ¡Te esperamos en FamySALUD!
+
+Nuestros horarios de atención son:
+
+Lun-Vie: 7:30AM - 5:30PM
+Sáb: 8:00AM - 12:30PM
+
+Será un gusto atenderte 💙` },
   paciente_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de FamySALUD." },
 
   empresa_salud_ocupacional: { type: "text", text: "Te brindaremos información sobre nuestros servicios de salud ocupacional." },
