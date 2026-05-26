@@ -392,14 +392,18 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    registrarEvento(from, "invalid_message", {
-      messageId,
-      payload: {
-        reason: "fallback_to_main_menu",
-        messageType: message.type
-      }
-    });
-    await enviarMenu(from, "principal");
+    if (featureHabilitada(ENABLE_AI_RESPONSES)) {
+      await manejarRespuestaIA(from, text, messageId);
+    } else {
+      registrarEvento(from, "invalid_message", {
+        messageId,
+        payload: {
+          reason: "fallback_to_main_menu",
+          messageType: message.type
+        }
+      });
+      await enviarMenu(from, "principal");
+    }
     return res.sendStatus(200);
   } catch (error) {
     console.error("[ERROR] Procesando mensaje:", error.response?.data || error.message);
@@ -508,6 +512,20 @@ async function manejarAgendamientoCita(to, messageId) {
   });
 
   await enviarMensajeConMenuPrincipal(to, accion.text);
+}
+
+async function manejarRespuestaIA(from, text, messageId) {
+  registrarEvento(from, "invalid_message", {
+    messageId,
+    payload: {
+      reason: "ai_response_stub",
+      aiEnabled: true,
+      stub: true,
+      textLength: text.length
+    }
+  });
+
+  await enviarMenu(from, "principal");
 }
 
 function debeMostrarMenu(text) {
