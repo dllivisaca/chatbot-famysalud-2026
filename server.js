@@ -330,7 +330,14 @@ https://www.famysalud.com.ec/salud-ocupacional
 https://www.famysalud.com.ec/web/paginas/salud-ocupacional
 
 Será un gusto ayudarte 💙` },
-  empresa_cotizar: { type: "text", text: "Para cotizar un servicio empresarial, un asesor te contactará pronto." },
+  empresa_cotizar: { type: "text_with_main_menu", text: `📋 ¡Gracias por tu interés en cotizar nuestros servicios para empresas!
+
+En FamySALUD estaremos encantados de ayudarte a encontrar la opción que mejor se adapte a las necesidades de tu empresa o institución.
+
+Puedes solicitar una cotización rápida aquí:
+https://forms.gle/HexK4xYrMWCgWoi18
+
+Nuestro equipo revisará la información y se comunicará contigo lo antes posible 💙` },
   empresa_mas_opciones_1: { type: "menu", menu: "empresasMasOpciones1" },
   empresa_resultados: { type: "text", text: "Para solicitar resultados empresariales, comparte los datos de tu empresa." },
   empresa_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para atención empresarial." },
