@@ -247,6 +247,7 @@ const MENUS = {
 
 const ACCIONES_BOTONES = {
   main_menu: { type: "main_menu" },
+  menu_principal: { type: "main_menu" },
   main_atenderme: { type: "menu", menu: "pacientes" },
   main_empresas: { type: "menu", menu: "empresas" },
   main_mas_opciones: { type: "menu", menu: "principalMasOpciones" },
@@ -536,9 +537,10 @@ async function manejarMensajeAsesor(from, rawText) {
       const paciente = sesionAsesor.paciente;
       console.log("[ASESOR] Finaliza atencion:", { asesor: from, paciente });
 
-      await enviarMensajeTexto(
+      await enviarBotones(
         paciente,
-        "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙"
+        "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
+        [boton("menu_principal", "Menú principal")]
       );
       resetearSesionAsesor();
       await enviarMensajeTexto(
