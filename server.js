@@ -59,6 +59,7 @@ const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 const ASESOR_WHATSAPP = "593989729682";
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
+const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
 let temporizadorSesionAsesor = null;
 const NUMEROS_INTERNOS = [
@@ -1312,9 +1313,14 @@ async function iniciarSolicitudProveedor(from, messageId, buttonId) {
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   sesionesProveedor.set(from, {
-    paso: "proveedor_enviando_propuesta",
+    paso: "proveedor_esperando_texto",
+    datosProveedor: null,
+    mensajesAdicionales: [],
+    adjuntos: [],
+    temporizador: null,
     timestamp: Date.now()
   });
+  reiniciarTemporizadorProveedor(from);
 
   console.log("[PROVEEDOR] Flujo iniciado:", { from });
   registrarEvento(from, "flow_completed", {
@@ -1330,7 +1336,7 @@ async function iniciarSolicitudProveedor(from, messageId, buttonId) {
     from,
     `🤝 ¡Gracias por tu interés en ser proveedor de FamySALUD!
 
-Para revisar tu propuesta, por favor envíanos la siguiente información en un solo mensaje:
+Para revisar tu propuesta, primero envíanos la información principal en texto, en un solo mensaje:
 
 1️⃣ Nombre de la empresa o proveedor  
 2️⃣ RUC o cédula  
@@ -1341,7 +1347,7 @@ Para revisar tu propuesta, por favor envíanos la siguiente información en un s
 7️⃣ Correo electrónico  
 8️⃣ Breve descripción de tu propuesta
 
-Puedes enviar también un catálogo, lista de precios o presentación si lo tienes disponible.`
+📌 Después de enviar estos datos, podrás adjuntar catálogos, listas de precios, presentaciones o documentos adicionales si los tienes disponibles.`
   );
 }
 
@@ -1361,41 +1367,317 @@ async function manejarFlujoProveedor(from, text, message, messageId) {
     return;
   }
 
-  if (sesion.paso !== "proveedor_enviando_propuesta") {
-    console.log("[PROVEEDOR] Paso no reconocido:", { from, paso: sesion.paso });
-    sesionesProveedor.delete(from);
-    await enviarMenu(from, "proveedores");
+  if (sesion.paso === "proveedor_esperando_texto") {
+    await manejarTextoInicialProveedor(from, text, message, messageId, sesion);
     return;
   }
 
+  if (sesion.paso === "proveedor_esperando_archivos") {
+    await manejarArchivosProveedor(from, text, message, messageId, sesion);
+    return;
+  }
+
+  console.log("[PROVEEDOR] Paso no reconocido:", { from, paso: sesion.paso });
+  limpiarSesionProveedor(from);
+  await enviarMenu(from, "proveedores");
+}
+
+async function manejarTextoInicialProveedor(from, text, message, messageId, sesion) {
   if (!text || !text.trim()) {
-    console.log("[PROVEEDOR] Mensaje no textual recibido:", {
+    console.log("[PROVEEDOR] Archivo recibido antes del texto:", {
       from,
       tipo: message?.type
     });
     await enviarMensajeTexto(
       from,
-      "Por favor envíanos primero la información solicitada en texto para poder revisar tu propuesta."
+      "📄 Antes de enviar archivos o catálogos, por favor envíanos primero la información solicitada en texto 😊"
     );
     return;
   }
 
-  sesionesProveedor.delete(from);
-  await notificarSolicitudProveedor(from, text.trim());
+  const datosProveedor = text.trim();
+  sesionesProveedor.set(from, {
+    ...sesion,
+    paso: "proveedor_esperando_archivos",
+    datosProveedor,
+    mensajesAdicionales: sesion.mensajesAdicionales || [],
+    adjuntos: sesion.adjuntos || [],
+    timestamp: Date.now()
+  });
+  reiniciarTemporizadorProveedor(from);
 
   registrarEvento(from, "flow_completed", {
     messageId,
     flowKey: "proveedor",
     payload: {
-      action: "provider_request_completed"
+      action: "provider_text_received"
     }
   });
 
-  console.log("[PROVEEDOR] Solicitud completada:", { from });
+  console.log("[PROVEEDOR] Informacion principal recibida:", { from });
+  await enviarMensajeTexto(
+    from,
+    `✅ Hemos recibido la información principal de tu propuesta.
+
+Si deseas, ahora puedes enviarnos:
+📎 catálogos
+📎 listas de precios
+📎 documentos
+📎 imágenes
+📎 presentaciones
+
+Cuando hayas terminado, escribe:
+finalizar`
+  );
+}
+
+async function manejarArchivosProveedor(from, text, message, messageId, sesion) {
+  const mensaje = (text || "").trim();
+
+  if (mensaje.toLowerCase() === "finalizar") {
+    await finalizarSolicitudProveedor(from, "manual", messageId);
+    return;
+  }
+
+  if (mensaje) {
+    sesionesProveedor.set(from, {
+      ...sesion,
+      mensajesAdicionales: [...(sesion.mensajesAdicionales || []), mensaje],
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorProveedor(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Mensaje adicional recibido.\n\nPuedes seguir enviando más información o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  if (esMensajeMultimedia(message)) {
+    console.log("[PROVEEDOR_ADJUNTO] Recibiendo archivo:", {
+      from,
+      tipo: message.type
+    });
+    const adjuntos = [...(sesion.adjuntos || [])];
+    try {
+      const adjunto = await descargarAdjuntoProveedor(message);
+      adjuntos.push(adjunto);
+    } catch (error) {
+      console.warn("[PROVEEDOR_ADJUNTO] Error descargando archivo:", error.message);
+      adjuntos.push({
+        tipo: message.type,
+        mediaId: message?.[message.type]?.id || null,
+        error: error.message,
+        caption: message?.[message.type]?.caption || ""
+      });
+    }
+    sesionesProveedor.set(from, {
+      ...sesion,
+      adjuntos,
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorProveedor(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Archivo recibido correctamente.\n\nPuedes seguir enviando más archivos o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  await enviarMensajeTexto(
+    from,
+    "Puedes enviar archivos adicionales o escribir:\nfinalizar"
+  );
+}
+
+function reiniciarTemporizadorProveedor(from) {
+  const sesion = obtenerSesionProveedor(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  if (sesion.temporizador) {
+    clearTimeout(sesion.temporizador);
+  }
+
+  const temporizador = setTimeout(async () => {
+    await expirarSolicitudProveedorPorInactividad(from);
+  }, TIEMPO_EXPIRACION_PROVEEDOR_MS);
+
+  sesionesProveedor.set(from, {
+    ...sesion,
+    temporizador,
+    timestamp: Date.now()
+  });
+
+  console.log("[PROVEEDOR] Temporizador reiniciado:", {
+    from,
+    tiempoMs: TIEMPO_EXPIRACION_PROVEEDOR_MS
+  });
+}
+
+async function expirarSolicitudProveedorPorInactividad(from) {
+  if (!obtenerSesionProveedor(from)) {
+    return;
+  }
+
+  console.log("[PROVEEDOR_EXPIRACION] Solicitud expirada por inactividad:", { from });
+  await finalizarSolicitudProveedor(from, "inactividad");
+}
+
+async function finalizarSolicitudProveedor(from, motivo = "manual", messageId = null) {
+  const sesion = obtenerSesionProveedor(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  try {
+    await notificarSolicitudProveedor(from, sesion);
+  } catch (error) {
+    console.warn("[PROVEEDOR] Error notificando propuesta:", error.message);
+  }
+
+  limpiarSesionProveedor(from, { eliminarAdjuntos: true });
+  if (motivo === "inactividad") {
+    cancelarExpiracionSesion(from);
+  }
+
+  if (messageId) {
+    registrarEvento(from, "flow_completed", {
+      messageId,
+      flowKey: "proveedor",
+      payload: {
+        action: motivo === "inactividad" ? "provider_request_expired" : "provider_request_completed",
+        attachmentCount: sesion.adjuntos?.length || 0
+      }
+    });
+  }
+
+  console.log("[PROVEEDOR] Solicitud finalizada:", {
+    from,
+    motivo,
+    adjuntos: sesion.adjuntos?.length || 0
+  });
+
+  if (motivo === "inactividad") {
+    await enviarMensajeConMenuPrincipal(
+      from,
+      "⏱️ La recepción de tu propuesta finalizó por inactividad.\n\nHemos recibido la información enviada y nuestro equipo la revisará. Gracias por pensar en FamySALUD 💙"
+    );
+    return;
+  }
+
   await enviarMensajeConMenuPrincipal(
     from,
     "✅ Hemos recibido tu propuesta de proveedor.\n\nNuestro equipo revisará la información y se comunicará contigo si la propuesta se ajusta a nuestras necesidades actuales.\n\nGracias por pensar en FamySALUD 💙"
   );
+}
+
+function limpiarSesionProveedor(from, opciones = {}) {
+  const { eliminarAdjuntos = true } = opciones;
+  const sesion = obtenerSesionProveedor(from);
+
+  if (sesion?.temporizador) {
+    clearTimeout(sesion.temporizador);
+  }
+
+  sesionesProveedor.delete(from);
+
+  if (eliminarAdjuntos && sesion?.adjuntos?.length) {
+    eliminarAdjuntosProveedor(sesion.adjuntos);
+  }
+}
+
+async function descargarAdjuntoProveedor(message) {
+  const tipo = message?.type;
+  const media = message?.[tipo];
+
+  if (!media?.id) {
+    throw new Error("Mensaje multimedia sin media id.");
+  }
+
+  if (!WHATSAPP_TOKEN) {
+    throw new Error("WHATSAPP_TOKEN no está configurado.");
+  }
+
+  const mediaUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${media.id}`;
+  const metadata = await axios.get(mediaUrl, {
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`
+    }
+  });
+  const downloadUrl = metadata.data?.url;
+
+  if (!downloadUrl) {
+    throw new Error("No se recibió URL de descarga de media.");
+  }
+
+  const archivo = await axios.get(downloadUrl, {
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`
+    }
+  });
+  const mimeType = media.mime_type || archivo.headers["content-type"] || "application/octet-stream";
+  const tmpDir = path.join(__dirname, "tmp", "proveedor-adjuntos");
+  await fs.promises.mkdir(tmpDir, { recursive: true });
+
+  const filename = sanitizarNombreArchivoProveedor(
+    media.filename || `${Date.now()}-${media.id}.${extensionPorMimeType(mimeType)}`
+  );
+  const filePath = path.join(tmpDir, filename);
+  await fs.promises.writeFile(filePath, Buffer.from(archivo.data));
+
+  console.log("[PROVEEDOR_ADJUNTO] Archivo descargado:", {
+    tipo,
+    filename,
+    mimeType
+  });
+
+  return {
+    tipo,
+    mediaId: media.id,
+    path: filePath,
+    filename,
+    mime_type: mimeType,
+    caption: media.caption || ""
+  };
+}
+
+function eliminarAdjuntosProveedor(adjuntos) {
+  for (const adjunto of adjuntos) {
+    if (!adjunto.path) {
+      continue;
+    }
+
+    fs.promises.unlink(adjunto.path).catch((error) => {
+      if (error.code !== "ENOENT") {
+        console.warn("[PROVEEDOR_ADJUNTO] No se pudo eliminar archivo temporal:", error.message);
+      }
+    });
+  }
+}
+
+function sanitizarNombreArchivoProveedor(filename) {
+  return String(filename || `adjunto-${Date.now()}`)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .slice(0, 120);
+}
+
+function extensionPorMimeType(mimeType) {
+  const extensiones = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "application/pdf": "pdf"
+  };
+
+  return extensiones[mimeType] || "bin";
 }
 
 async function manejarFlujoResultados(from, text, buttonId, messageId) {
@@ -1710,12 +1992,13 @@ async function notificarSolicitudResultadosEmpresa(from, mensajeUsuario) {
   });
 }
 
-async function notificarSolicitudProveedor(from, mensajeUsuario) {
-  const message = construirMensajeInternoProveedor(from, mensajeUsuario);
-  const subject = "Nueva propuesta de proveedor";
+async function notificarSolicitudProveedor(from, sesion) {
+  const message = construirMensajeInternoProveedor(from, sesion);
+  const subject = "Nueva propuesta de proveedor - FamySALUD";
+  const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
     enviarWhatsAppInternoResultados(message),
-    enviarCorreoInternoResultados(subject, message)
+    enviarCorreoInternoResultados(subject, message, attachments)
   ]);
   const whatsappStatus = resultados[0].status;
   const emailStatus = resultados[1].status;
@@ -1734,8 +2017,11 @@ async function notificarSolicitudProveedor(from, mensajeUsuario) {
   console.log("[PROVEEDOR] Notificación interna procesada", {
     fromHash: hashUsuario(from),
     whatsappStatus,
-    emailStatus
+    emailStatus,
+    attachmentCount: attachments.length
   });
+
+  await enviarAdjuntosProveedorWhatsApp(sesion.adjuntos || []);
 }
 
 function construirMensajeInternoResultados(from, datos) {
@@ -1755,7 +2041,15 @@ function construirMensajeInternoResultados(from, datos) {
   ].join("\n");
 }
 
-function construirMensajeInternoProveedor(from, mensajeUsuario) {
+function construirMensajeInternoProveedor(from, sesion) {
+  const mensajesAdicionales = sesion.mensajesAdicionales?.length
+    ? sesion.mensajesAdicionales.join("\n\n")
+    : "Sin mensajes adicionales";
+  const adjuntos = sesion.adjuntos || [];
+  const archivosConError = adjuntos
+    .filter((adjunto) => adjunto.error)
+    .map((adjunto) => `- ${adjunto.tipo || "archivo"}: ${adjunto.error}`);
+
   return [
     "🤝 Nueva propuesta de proveedor",
     "",
@@ -1770,11 +2064,65 @@ function construirMensajeInternoProveedor(from, mensajeUsuario) {
     "8️⃣ Breve descripción de la propuesta",
     "",
     "Datos enviados por el usuario:",
-    mensajeUsuario,
+    sesion.datosProveedor || "Sin datos principales",
+    "",
+    "Mensajes adicionales:",
+    mensajesAdicionales,
+    "",
+    "Archivos recibidos:",
+    String(adjuntos.length),
+    ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
     "",
     "Número de WhatsApp del solicitante:",
     from
   ].join("\n");
+}
+
+function construirAdjuntosCorreoProveedor(adjuntos) {
+  return adjuntos
+    .filter((adjunto) => adjunto.path && !adjunto.error)
+    .map((adjunto) => ({
+      filename: adjunto.filename,
+      path: adjunto.path,
+      contentType: adjunto.mime_type
+    }));
+}
+
+async function enviarAdjuntosProveedorWhatsApp(adjuntos) {
+  if (!adjuntos.length) {
+    return;
+  }
+
+  for (const adjunto of adjuntos) {
+    if (!adjunto.mediaId || adjunto.error) {
+      continue;
+    }
+
+    try {
+      await enviarWhatsAppInternoResultados("📎 Archivo adjunto de proveedor:");
+      await reenviarMensajeMultimedia(INTERNAL_RESULTS_WHATSAPP_TO, construirMensajeMediaProveedor(adjunto));
+    } catch (error) {
+      console.warn("[WHATSAPP_INTERNO] Error reenviando adjunto de proveedor:", error.message);
+    }
+  }
+}
+
+function construirMensajeMediaProveedor(adjunto) {
+  const tipo = adjunto.tipo;
+  const media = {
+    id: adjunto.mediaId,
+    mime_type: adjunto.mime_type,
+    caption: adjunto.caption
+  };
+
+  if (tipo === "document") {
+    media.filename = adjunto.filename;
+  }
+
+  return {
+    type: tipo,
+    [tipo]: media
+  };
 }
 
 function construirMensajeInternoResultadosEmpresa(from, mensajeUsuario) {
@@ -1812,7 +2160,7 @@ async function enviarWhatsAppInternoResultados(message) {
   });
 }
 
-async function enviarCorreoInternoResultados(subject, message) {
+async function enviarCorreoInternoResultados(subject, message, attachments = []) {
   if (!RESULTS_INTERNAL_EMAIL || !RESULTS_EMAIL_FROM || !SMTP_HOST) {
     throw new Error("Configuración SMTP incompleta.");
   }
@@ -1833,7 +2181,8 @@ async function enviarCorreoInternoResultados(subject, message) {
     from: RESULTS_EMAIL_FROM,
     to: RESULTS_INTERNAL_EMAIL,
     subject,
-    text: message
+    text: message,
+    attachments
   });
 }
 
@@ -1875,7 +2224,7 @@ function limpiarSesionesUsuario(from) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
-  sesionesProveedor.delete(from);
+  limpiarSesionProveedor(from);
   sesionesExpiradas.delete(from);
   cancelarExpiracionSesion(from);
 }
@@ -1906,12 +2255,17 @@ async function expirarSesionUsuario(from) {
     return;
   }
 
+  if (obtenerSesionProveedor(from)) {
+    await finalizarSolicitudProveedor(from, "inactividad");
+    return;
+  }
+
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
-  sesionesProveedor.delete(from);
+  limpiarSesionProveedor(from);
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
@@ -1956,7 +2310,7 @@ function consumirSesionUsuarioExpirada(from) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
-  sesionesProveedor.delete(from);
+  limpiarSesionProveedor(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
