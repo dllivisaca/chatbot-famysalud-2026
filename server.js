@@ -56,6 +56,10 @@ const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 const ASESOR_WHATSAPP = "593989729682";
+const NUMEROS_INTERNOS = [
+  "593989729682",
+  "593939034743"
+];
 const ASESORES_REGISTRADOS = {
   jennifer: { nombre: "Jennifer", cargo: "asesora" },
   yadira: { nombre: "Yadira", cargo: "asesora" },
@@ -75,6 +79,10 @@ let catalogoServiciosCacheTimestamp = 0;
 
 function flagActiva(value) {
   return String(value || "").trim().toLowerCase() === "true";
+}
+
+function esNumeroInterno(numero) {
+  return NUMEROS_INTERNOS.includes(numero);
 }
 
 function esProduccion() {
@@ -385,6 +393,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (await manejarMensajePacienteAsesor(from, rawText, message)) {
+      return res.sendStatus(200);
+    }
+
+    if (esNumeroInterno(from)) {
+      console.log("[INTERNO] Número interno detectado. Chatbot principal omitido:", from);
       return res.sendStatus(200);
     }
 
