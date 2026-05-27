@@ -76,6 +76,7 @@ let sesionAsesor = {
   nombreAsesor: null,
   cargoAsesor: null,
   nombreTemporalAsesor: null,
+  origen: "paciente",
   estado: "libre"
 };
 let catalogoServiciosCache = null;
@@ -230,7 +231,7 @@ const MENUS = {
     text: "Elige una opción:",
     buttons: [
       boton("empresa_horarios", "Horarios"),
-      boton("empresa_asesor", "Hablar con asesor")
+      boton("empresa_hablar_asesor", "Hablar con asesor")
     ]
   },
   proveedores: {
@@ -315,7 +316,7 @@ Lun-Vie: 7:30AM - 5:30PM
 Sáb: 8:00AM - 12:30PM
 
 Será un gusto atenderte 💙` },
-  paciente_hablar_asesor: { type: "advisor_chat" },
+  paciente_hablar_asesor: { type: "advisor_chat", origen: "paciente" },
   paciente_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de FamySALUD." },
 
   empresa_salud_ocupacional: { type: "text_with_main_menu", text: `🏢 Gracias por tu interés en nuestros servicios de Salud Ocupacional.
@@ -352,7 +353,8 @@ Lun-Vie: 7:30AM - 5:30PM
 Sáb: 8:00AM - 12:30PM
 
 Será un gusto atenderte 💙` },
-  empresa_asesor: { type: "text", text: "En breve te comunicaremos con un asesor empresarial." },
+  empresa_hablar_asesor: { type: "advisor_chat", origen: "empresa" },
+  empresa_asesor: { type: "advisor_chat", origen: "empresa" },
 
   proveedor_propuesta: { type: "text", text: "Puedes enviar tu propuesta y nuestro equipo la revisará." },
   proveedor_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para proveedores." },
@@ -520,8 +522,13 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-async function iniciarSesionAsesor(paciente, messageId, buttonId) {
-  console.log("[PACIENTE] Solicita hablar con asesor:", { paciente, estado: sesionAsesor.estado });
+async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paciente") {
+  const esEmpresa = origen === "empresa";
+  console.log(esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
+    paciente,
+    origen,
+    estado: sesionAsesor.estado
+  });
 
   if (sesionAsesor.estado !== "libre" || colaEsperaAsesor.length > 0) {
     if (sesionAsesor.paciente === paciente) {
@@ -532,20 +539,24 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId) {
       return;
     }
 
-    if (agregarPacienteAColaAsesor(paciente)) {
+    if (agregarPacienteAColaAsesor(paciente, origen)) {
       console.log("[COLA_ASESOR] Paciente agregado a cola:", {
         paciente,
+        origen,
         totalEnCola: colaEsperaAsesor.length
       });
       await enviarMensajeTexto(
         paciente,
-        "💬 En este momento nuestros asesores están atendiendo a otro paciente.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
+        esEmpresa
+          ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
+          : "💬 En este momento nuestros asesores están atendiendo a otro paciente.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
       );
       return;
     }
 
     console.log("[COLA_ASESOR] Paciente ya estaba en cola:", {
       paciente,
+      origen,
       totalEnCola: colaEsperaAsesor.length
     });
     await enviarMensajeTexto(
@@ -561,6 +572,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId) {
     nombreAsesor: null,
     cargoAsesor: null,
     nombreTemporalAsesor: null,
+    origen,
     estado: "esperando_nombre"
   };
 
@@ -568,16 +580,20 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId) {
   registrarEvento(paciente, "advisor_session_requested", {
     messageId,
     buttonId,
-    flowKey: "paciente_hablar_asesor"
+    flowKey: esEmpresa ? "empresa_hablar_asesor" : "paciente_hablar_asesor"
   });
 
   await enviarMensajeTexto(
     paciente,
-    "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
+    esEmpresa
+      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de servicios para empresas. Por favor espera un momento 😊"
+      : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
   );
   await enviarMensajeTexto(
     ASESOR_WHATSAPP,
-    "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+    esEmpresa
+      ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      : "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
   );
 }
 
@@ -664,17 +680,21 @@ async function conectarAsesorConPaciente(asesor) {
   sesionAsesor.nombreAsesor = asesor.nombre;
   sesionAsesor.cargoAsesor = asesor.cargo;
   sesionAsesor.estado = "conectado";
+  const origen = sesionAsesor.origen || "paciente";
 
   console.log("[ASESOR] Conectado con paciente:", {
     paciente: sesionAsesor.paciente,
     nombreAsesor: sesionAsesor.nombreAsesor,
-    cargoAsesor: sesionAsesor.cargoAsesor
+    cargoAsesor: sesionAsesor.cargoAsesor,
+    origen
   });
   console.log("[SESION] Asesor conectado:", sesionAsesor);
 
   await enviarMensajeTexto(
     sesionAsesor.paciente,
-    `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué te puedo ayudar?`
+    origen === "empresa"
+      ? `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué podemos ayudarte con los servicios para tu empresa o institución?`
+      : `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué te puedo ayudar?`
   );
   await enviarMensajeTexto(
     sesionAsesor.asesor,
@@ -825,13 +845,14 @@ function pacienteEstaEnColaAsesor(numero) {
   return colaEsperaAsesor.some((item) => item.paciente === numero);
 }
 
-function agregarPacienteAColaAsesor(paciente) {
+function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
   if (pacienteEstaEnColaAsesor(paciente)) {
     return false;
   }
 
   colaEsperaAsesor.push({
     paciente,
+    origen,
     creadoEn: Date.now()
   });
 
@@ -880,12 +901,15 @@ async function finalizarSesionAsesor(motivo = "manual") {
 
   const paciente = sesionAsesor.paciente;
   const asesor = sesionAsesor.asesor;
+  const origen = sesionAsesor.origen || "paciente";
 
   try {
     if (motivo === "inactividad") {
       await enviarBotones(
         paciente,
-        "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta.",
+        origen === "empresa"
+          ? "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta para tu empresa o institución."
+          : "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta.",
         [boton("menu_principal", "Menú principal")]
       );
       await enviarMensajeTexto(
@@ -895,7 +919,9 @@ async function finalizarSesionAsesor(motivo = "manual") {
     } else {
       await enviarBotones(
         paciente,
-        "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
+        origen === "empresa"
+          ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu solicitud empresarial 💙"
+          : "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
         [boton("menu_principal", "Menú principal")]
       );
       await enviarMensajeTexto(
@@ -911,6 +937,7 @@ async function finalizarSesionAsesor(motivo = "manual") {
     motivo,
     paciente,
     asesor,
+    origen,
     pacientesEnCola: colaEsperaAsesor.length
   });
 
@@ -931,11 +958,13 @@ async function atenderSiguientePacienteEnCola() {
     nombreAsesor: null,
     cargoAsesor: null,
     nombreTemporalAsesor: null,
+    origen: siguiente.origen || "paciente",
     estado: "esperando_nombre"
   };
 
   console.log("[COLA_ASESOR] Atendiendo siguiente paciente en cola:", {
     paciente: sesionAsesor.paciente,
+    origen: sesionAsesor.origen,
     restantesEnCola: colaEsperaAsesor.length
   });
   console.log("[SESION] Asesor esperando nombre desde cola:", sesionAsesor);
@@ -946,7 +975,9 @@ async function atenderSiguientePacienteEnCola() {
   );
   await enviarMensajeTexto(
     sesionAsesor.asesor,
-    "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+    sesionAsesor.origen === "empresa"
+      ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      : "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
   );
 }
 
@@ -956,24 +987,33 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
   }
 
   const mensaje = (rawText || "").trim();
+  const origen = sesionAsesor.origen || "paciente";
 
   if (mensaje) {
-    console.log("[PACIENTE] Reenviando mensaje al asesor:", {
+    console.log(origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando mensaje al asesor:" : "[PACIENTE] Reenviando mensaje al asesor:", {
       paciente: from,
-      asesor: sesionAsesor.asesor
+      asesor: sesionAsesor.asesor,
+      origen
     });
-    await enviarMensajeTexto(sesionAsesor.asesor, `👤 Paciente:\n${mensaje}`);
+    await enviarMensajeTexto(
+      sesionAsesor.asesor,
+      origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
+    );
     reiniciarTemporizadorSesionAsesor();
     return true;
   }
 
   if (esMensajeMultimedia(message)) {
-    console.log("[PACIENTE] Reenviando multimedia al asesor:", {
+    console.log(origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando multimedia al asesor:" : "[PACIENTE] Reenviando multimedia al asesor:", {
       paciente: from,
       asesor: sesionAsesor.asesor,
-      tipo: message.type
+      tipo: message.type,
+      origen
     });
-    await enviarMensajeTexto(sesionAsesor.asesor, "👤 Paciente envió un archivo:");
+    await enviarMensajeTexto(
+      sesionAsesor.asesor,
+      origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
+    );
     await reenviarMensajeMultimedia(sesionAsesor.asesor, message);
     reiniciarTemporizadorSesionAsesor();
   }
@@ -993,6 +1033,7 @@ function resetearSesionAsesor() {
     nombreAsesor: null,
     cargoAsesor: null,
     nombreTemporalAsesor: null,
+    origen: "paciente",
     estado: "libre"
   };
   console.log("[SESION] Asesor libre:", sesionAsesor);
@@ -1072,7 +1113,7 @@ async function manejarBoton(to, buttonId, messageId) {
   }
 
   if (accion.type === "advisor_chat") {
-    await iniciarSesionAsesor(to, messageId, buttonId);
+    await iniciarSesionAsesor(to, messageId, buttonId, accion.origen || "paciente");
     return;
   }
 
