@@ -361,7 +361,14 @@ Será un gusto atenderte 💙` },
   proveedor_propuesta: { type: "provider_request" },
   proveedor_ubicacion: { type: "provider_location" },
   proveedor_mas_opciones: { type: "menu", menu: "proveedoresMasOpciones" },
-  proveedor_horarios: { type: "text", text: "Nuestros horarios para proveedores serán confirmados por un asesor." },
+  proveedor_horarios: { type: "text_with_main_menu", text: `🕒 Claro, con gusto te compartimos nuestros horarios de atención.
+
+Si deseas coordinar una visita, presentar una propuesta o entregar información como proveedor, puedes contactarnos o acercarte en los siguientes horarios:
+
+Lun-Vie: 7:30AM - 5:30PM
+Sáb: 8:00AM - 12:30PM
+
+Será un gusto atenderte 💙` },
   proveedor_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de proveedores." },
 
   alianza_info: { type: "text", text: "Déjanos tu información y nuestro equipo evaluará la alianza." },
