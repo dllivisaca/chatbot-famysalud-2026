@@ -359,7 +359,7 @@ Será un gusto atenderte 💙` },
   empresa_asesor: { type: "advisor_chat", origen: "empresa" },
 
   proveedor_propuesta: { type: "provider_request" },
-  proveedor_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para proveedores." },
+  proveedor_ubicacion: { type: "provider_location" },
   proveedor_mas_opciones: { type: "menu", menu: "proveedoresMasOpciones" },
   proveedor_horarios: { type: "text", text: "Nuestros horarios para proveedores serán confirmados por un asesor." },
   proveedor_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de proveedores." },
@@ -1121,6 +1121,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "company_location") {
     await enviarUbicacionEmpresa(to);
+    return;
+  }
+
+  if (accion.type === "provider_location") {
+    await enviarUbicacionProveedor(to);
     return;
   }
 
@@ -3056,6 +3061,18 @@ async function enviarUbicacionEmpresa(to) {
     `📍 Claro, con gusto te compartimos nuestra ubicación.
 
 Si tu empresa o institución desea visitarnos, coordinar servicios o conocer más sobre FamySALUD, puedes encontrarnos aquí:
+
+Quisquis 1109 y José Mascote
+Guayaquil, Ecuador`
+  );
+}
+
+async function enviarUbicacionProveedor(to) {
+  await enviarUbicacionFamysalud(
+    to,
+    `📍 Claro, con gusto te compartimos nuestra ubicación.
+
+Si deseas visitarnos para presentar productos, coordinar una propuesta o conocer más sobre FamySALUD, puedes encontrarnos aquí:
 
 Quisquis 1109 y José Mascote
 Guayaquil, Ecuador`
