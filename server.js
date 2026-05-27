@@ -56,10 +56,18 @@ const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 const ASESOR_WHATSAPP = "593989729682";
+const ASESORES_REGISTRADOS = {
+  jennifer: { nombre: "Jennifer", cargo: "asesora" },
+  yadira: { nombre: "Yadira", cargo: "asesora" },
+  daisy: { nombre: "Daisy", cargo: "asesora" },
+  david: { nombre: "David", cargo: "asesor" }
+};
 let sesionAsesor = {
   paciente: null,
   asesor: ASESOR_WHATSAPP,
   nombreAsesor: null,
+  cargoAsesor: null,
+  nombreTemporalAsesor: null,
   estado: "libre"
 };
 let catalogoServiciosCache = null;
@@ -478,6 +486,8 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId) {
     paciente,
     asesor: ASESOR_WHATSAPP,
     nombreAsesor: null,
+    cargoAsesor: null,
+    nombreTemporalAsesor: null,
     estado: "esperando_nombre"
   };
 
@@ -511,24 +521,38 @@ async function manejarMensajeAsesor(from, rawText) {
       return true;
     }
 
-    sesionAsesor.nombreAsesor = mensaje;
-    sesionAsesor.estado = "conectado";
+    const asesorRegistrado = detectarAsesorRegistrado(mensaje);
 
-    console.log("[ASESOR] Conectado con paciente:", {
-      asesor: from,
-      paciente: sesionAsesor.paciente,
-      nombreAsesor: sesionAsesor.nombreAsesor
-    });
-    console.log("[SESION] Asesor conectado:", sesionAsesor);
+    if (asesorRegistrado) {
+      await conectarAsesorConPaciente(asesorRegistrado);
+      return true;
+    }
 
-    await enviarMensajeTexto(
-      sesionAsesor.paciente,
-      `Hola, soy ${sesionAsesor.nombreAsesor}, asesora de FamySALUD 💙\nUn gusto atenderte. ¿En qué te puedo ayudar?`
-    );
+    sesionAsesor.nombreTemporalAsesor = mensaje;
+    sesionAsesor.estado = "esperando_nombre_cargo";
+    console.log("[ASESOR] Nombre no reconocido:", { recibido: mensaje });
+    console.log("[SESION] Esperando nombre y cargo:", sesionAsesor);
+
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      "✅ Te conectaste con el paciente.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar"
+      "No reconocí ese nombre como asesor registrado.\n\nPor favor responde con tu nombre y cargo.\nEjemplo:\nCarlos asesor\nMaría asesora"
     );
+    return true;
+  }
+
+  if (sesionAsesor.estado === "esperando_nombre_cargo") {
+    const asesorConCargo = extraerAsesorConCargo(mensaje);
+
+    if (!asesorConCargo) {
+      console.log("[ASESOR] Falta cargo para conectar:", { recibido: mensaje });
+      await enviarMensajeTexto(
+        sesionAsesor.asesor,
+        "Por favor incluye el cargo para continuar.\nEjemplo:\nCarlos asesor\nMaría asesora"
+      );
+      return true;
+    }
+
+    await conectarAsesorConPaciente(asesorConCargo);
     return true;
   }
 
@@ -563,6 +587,166 @@ async function manejarMensajeAsesor(from, rawText) {
   return false;
 }
 
+async function conectarAsesorConPaciente(asesor) {
+  sesionAsesor.nombreAsesor = asesor.nombre;
+  sesionAsesor.cargoAsesor = asesor.cargo;
+  sesionAsesor.estado = "conectado";
+
+  console.log("[ASESOR] Conectado con paciente:", {
+    paciente: sesionAsesor.paciente,
+    nombreAsesor: sesionAsesor.nombreAsesor,
+    cargoAsesor: sesionAsesor.cargoAsesor
+  });
+  console.log("[SESION] Asesor conectado:", sesionAsesor);
+
+  await enviarMensajeTexto(
+    sesionAsesor.paciente,
+    `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué te puedo ayudar?`
+  );
+  await enviarMensajeTexto(
+    sesionAsesor.asesor,
+    "✅ Te conectaste con el paciente.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar"
+  );
+}
+
+function detectarAsesorRegistrado(texto) {
+  const nombreNormalizado = normalizarTextoAsesor(quitarCargoAsesor(texto));
+
+  if (ASESORES_REGISTRADOS[nombreNormalizado]) {
+    console.log("[ASESOR] Nombre reconocido exacto:", {
+      recibido: texto,
+      reconocido: ASESORES_REGISTRADOS[nombreNormalizado].nombre
+    });
+    return ASESORES_REGISTRADOS[nombreNormalizado];
+  }
+
+  let mejorCoincidencia = null;
+
+  for (const [nombre, datos] of Object.entries(ASESORES_REGISTRADOS)) {
+    const diferenciaLongitud = Math.abs(nombreNormalizado.length - nombre.length);
+
+    if (diferenciaLongitud > 2) {
+      continue;
+    }
+
+    const distancia = calcularDistanciaLevenshtein(nombreNormalizado, nombre);
+    const diferenciaCaracteres = calcularDiferenciaCaracteres(nombreNormalizado, nombre);
+
+    if (
+      distancia <= 2 &&
+      (
+        !mejorCoincidencia ||
+        distancia < mejorCoincidencia.distancia ||
+        (distancia === mejorCoincidencia.distancia && diferenciaCaracteres < mejorCoincidencia.diferenciaCaracteres)
+      )
+    ) {
+      mejorCoincidencia = {
+        datos,
+        distancia,
+        diferenciaCaracteres
+      };
+    }
+  }
+
+  if (mejorCoincidencia) {
+    console.log("[ASESOR] Nombre corregido por similitud:", {
+      recibido: texto,
+      reconocido: mejorCoincidencia.datos.nombre,
+      distancia: mejorCoincidencia.distancia
+    });
+    return mejorCoincidencia.datos;
+  }
+
+  return null;
+}
+
+function extraerAsesorConCargo(texto) {
+  const mensaje = (texto || "").trim();
+  const normalizado = normalizarTextoAsesor(mensaje);
+  const cargo = normalizado.includes("asesora") ? "asesora" : normalizado.includes("asesor") ? "asesor" : null;
+
+  if (!cargo) {
+    return null;
+  }
+
+  const nombreSinCargo = mensaje
+    .replace(/\basesora\b/gi, "")
+    .replace(/\basesor\b/gi, "")
+    .trim()
+    .replace(/\s+/g, " ");
+  const nombre = formatearNombreAsesor(nombreSinCargo || sesionAsesor.nombreTemporalAsesor);
+
+  if (!nombre) {
+    return null;
+  }
+
+  return { nombre, cargo };
+}
+
+function quitarCargoAsesor(texto) {
+  return String(texto || "")
+    .replace(/\basesora\b/gi, "")
+    .replace(/\basesor\b/gi, "");
+}
+
+function normalizarTextoAsesor(texto) {
+  return String(texto || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function calcularDistanciaLevenshtein(a, b) {
+  const matriz = Array.from({ length: a.length + 1 }, () => []);
+
+  for (let i = 0; i <= a.length; i += 1) {
+    matriz[i][0] = i;
+  }
+
+  for (let j = 0; j <= b.length; j += 1) {
+    matriz[0][j] = j;
+  }
+
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const costo = a[i - 1] === b[j - 1] ? 0 : 1;
+      matriz[i][j] = Math.min(
+        matriz[i - 1][j] + 1,
+        matriz[i][j - 1] + 1,
+        matriz[i - 1][j - 1] + costo
+      );
+    }
+  }
+
+  return matriz[a.length][b.length];
+}
+
+function calcularDiferenciaCaracteres(a, b) {
+  const conteos = new Map();
+
+  for (const caracter of a) {
+    conteos.set(caracter, (conteos.get(caracter) || 0) + 1);
+  }
+
+  for (const caracter of b) {
+    conteos.set(caracter, (conteos.get(caracter) || 0) - 1);
+  }
+
+  return Array.from(conteos.values()).reduce((total, diferencia) => total + Math.abs(diferencia), 0);
+}
+
+function formatearNombreAsesor(nombre) {
+  return String(nombre || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((parte) => parte.charAt(0).toLocaleUpperCase("es-EC") + parte.slice(1).toLocaleLowerCase("es-EC"))
+    .join(" ");
+}
+
 async function manejarMensajePacienteAsesor(from, rawText) {
   if (sesionAsesor.estado !== "conectado" || from !== sesionAsesor.paciente) {
     return false;
@@ -586,6 +770,8 @@ function resetearSesionAsesor() {
     paciente: null,
     asesor: ASESOR_WHATSAPP,
     nombreAsesor: null,
+    cargoAsesor: null,
+    nombreTemporalAsesor: null,
     estado: "libre"
   };
   console.log("[SESION] Asesor libre:", sesionAsesor);
