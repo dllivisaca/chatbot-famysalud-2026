@@ -52,6 +52,7 @@ const UBICACION_FAMYSALUD = {
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const sesionesResultados = new Map();
+const sesionesResultadosEmpresas = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
@@ -220,7 +221,7 @@ const MENUS = {
   empresasMasOpciones1: {
     text: "Elige una opción:",
     buttons: [
-      boton("empresa_resultados", "Solicitar resultados"),
+      boton("empresa_solicitar_resultados", "Solicitar resultados"),
       boton("empresa_ubicacion", "Ubicación"),
       boton("empresa_mas_opciones_2", "Más opciones")
     ]
@@ -339,7 +340,8 @@ https://forms.gle/HexK4xYrMWCgWoi18
 
 Nuestro equipo revisará la información y se comunicará contigo lo antes posible 💙` },
   empresa_mas_opciones_1: { type: "menu", menu: "empresasMasOpciones1" },
-  empresa_resultados: { type: "text", text: "Para solicitar resultados empresariales, comparte los datos de tu empresa." },
+  empresa_solicitar_resultados: { type: "company_results_request" },
+  empresa_resultados: { type: "company_results_request" },
   empresa_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para atención empresarial." },
   empresa_mas_opciones_2: { type: "menu", menu: "empresasMasOpciones2" },
   empresa_horarios: { type: "text", text: "Nuestros horarios de atención serán confirmados por un asesor." },
@@ -459,6 +461,11 @@ app.post("/webhook", async (req, res) => {
 
     if (estaEnFlujoResultados(from)) {
       await manejarFlujoResultados(from, rawText, buttonId, messageId);
+      return res.sendStatus(200);
+    }
+
+    if (estaEnFlujoResultadosEmpresa(from)) {
+      await manejarFlujoResultadosEmpresa(from, rawText, messageId);
       return res.sendStatus(200);
     }
 
@@ -1037,6 +1044,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "company_results_request") {
+    await iniciarSolicitudResultadosEmpresa(to, messageId, buttonId);
+    return;
+  }
+
   if (accion.type === "promotions") {
     await enviarPromociones(to);
     return;
@@ -1177,12 +1189,58 @@ async function iniciarSolicitudResultados(from, messageId) {
   await enviarTipoResultado(from);
 }
 
+async function iniciarSolicitudResultadosEmpresa(from, messageId, buttonId) {
+  sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.set(from, {
+    paso: "empresa_solicitando_resultados",
+    timestamp: Date.now()
+  });
+
+  console.log("[EMPRESA_RESULTADOS] Flujo iniciado:", { from });
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId,
+    flowKey: "empresa_resultados",
+    payload: {
+      action: "company_results_request_started"
+    }
+  });
+
+  await enviarMensajeTexto(
+    from,
+    `📄 Claro, con gusto te ayudamos con la solicitud de resultados para empresa.
+
+Para poder ayudarte, por favor envíanos la siguiente información:
+
+1️⃣ Nombre de la empresa  
+2️⃣ RUC  
+3️⃣ Nombre de la persona que solicita  
+4️⃣ Número de contacto  
+5️⃣ Correo electrónico  
+6️⃣ Detalle de los resultados que necesita consultar
+
+Puedes enviar todo en un solo mensaje 😊
+
+Importante:
+Esta solicitud será registrada como EMPRESA.`
+  );
+}
+
 function obtenerSesionResultados(from) {
   return sesionesResultados.get(from) || null;
 }
 
 function estaEnFlujoResultados(from) {
   return Boolean(obtenerSesionResultados(from));
+}
+
+function obtenerSesionResultadosEmpresa(from) {
+  return sesionesResultadosEmpresas.get(from) || null;
+}
+
+function estaEnFlujoResultadosEmpresa(from) {
+  return Boolean(obtenerSesionResultadosEmpresa(from));
 }
 
 async function manejarFlujoResultados(from, text, buttonId, messageId) {
@@ -1251,6 +1309,48 @@ async function manejarFlujoResultados(from, text, buttonId, messageId) {
   });
   sesionesResultados.delete(from);
   await enviarMenu(from, "pacientes");
+}
+
+async function manejarFlujoResultadosEmpresa(from, text, messageId) {
+  const sesion = obtenerSesionResultadosEmpresa(from);
+
+  if (!sesion) {
+    await iniciarSolicitudResultadosEmpresa(from, messageId, "empresa_solicitar_resultados");
+    return;
+  }
+
+  if (sesion.paso !== "empresa_solicitando_resultados") {
+    console.log("[EMPRESA_RESULTADOS] Paso no reconocido:", { from, paso: sesion.paso });
+    sesionesResultadosEmpresas.delete(from);
+    await enviarMenu(from, "empresas");
+    return;
+  }
+
+  if (!text || !text.trim()) {
+    console.log("[EMPRESA_RESULTADOS] Mensaje vacio recibido:", { from });
+    await enviarMensajeTexto(
+      from,
+      "Por favor envíanos la información solicitada en un solo mensaje para continuar."
+    );
+    return;
+  }
+
+  sesionesResultadosEmpresas.delete(from);
+  await notificarSolicitudResultadosEmpresa(from, text.trim());
+
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    flowKey: "empresa_resultados",
+    payload: {
+      action: "company_results_request_completed"
+    }
+  });
+
+  console.log("[EMPRESA_RESULTADOS] Solicitud completada:", { from });
+  await enviarMensajeConMenuPrincipal(
+    from,
+    "✅ Hemos recibido tu solicitud de resultados empresariales.\n\nNuestro equipo revisará la información y se comunicará contigo lo antes posible 💙"
+  );
 }
 
 async function manejarTipoResultado(from, text, buttonId, messageId, sesion) {
@@ -1427,6 +1527,34 @@ async function notificarSolicitudResultados(from, datos) {
   });
 }
 
+async function notificarSolicitudResultadosEmpresa(from, mensajeUsuario) {
+  const message = construirMensajeInternoResultadosEmpresa(from, mensajeUsuario);
+  const subject = "Nueva solicitud de resultados - EMPRESA";
+  const resultados = await Promise.allSettled([
+    enviarWhatsAppInternoResultados(message),
+    enviarCorreoInternoResultados(subject, message)
+  ]);
+  const whatsappStatus = resultados[0].status;
+  const emailStatus = resultados[1].status;
+
+  resultados.forEach((resultado, index) => {
+    const canal = index === 0 ? "[WHATSAPP_INTERNO]" : "[CORREO]";
+
+    if (resultado.status === "rejected") {
+      console.warn(canal, "Error en notificación de resultados empresa:", resultado.reason?.message);
+      return;
+    }
+
+    console.log(canal, "Notificación de resultados empresa enviada.");
+  });
+
+  console.log("[EMPRESA_RESULTADOS] Notificación interna procesada", {
+    fromHash: hashUsuario(from),
+    whatsappStatus,
+    emailStatus
+  });
+}
+
 function construirMensajeInternoResultados(from, datos) {
   return [
     "Nueva solicitud de resultados",
@@ -1441,6 +1569,18 @@ function construirMensajeInternoResultados(from, datos) {
     `WhatsApp del paciente: ${from}`,
     "",
     "Acción requerida: Revisar la información y gestionar manualmente el envío de resultados al paciente."
+  ].join("\n");
+}
+
+function construirMensajeInternoResultadosEmpresa(from, mensajeUsuario) {
+  return [
+    "📄 Nueva solicitud de resultados - EMPRESA",
+    "",
+    "Datos enviados por el usuario:",
+    mensajeUsuario,
+    "",
+    "Número de WhatsApp del solicitante:",
+    from
   ].join("\n");
 }
 
@@ -1521,6 +1661,7 @@ function limpiarSesionesUsuario(from) {
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
   sesionesExpiradas.delete(from);
   cancelarExpiracionSesion(from);
 }
@@ -1555,6 +1696,7 @@ async function expirarSesionUsuario(from) {
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
@@ -1598,6 +1740,7 @@ function consumirSesionUsuarioExpirada(from) {
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
