@@ -56,6 +56,9 @@ const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 const ASESOR_WHATSAPP = "593989729682";
+const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
+const colaEsperaAsesor = [];
+let temporizadorSesionAsesor = null;
 const NUMEROS_INTERNOS = [
   "593989729682",
   "593939034743"
@@ -487,10 +490,34 @@ app.post("/webhook", async (req, res) => {
 async function iniciarSesionAsesor(paciente, messageId, buttonId) {
   console.log("[PACIENTE] Solicita hablar con asesor:", { paciente, estado: sesionAsesor.estado });
 
-  if (sesionAsesor.estado !== "libre") {
+  if (sesionAsesor.estado !== "libre" || colaEsperaAsesor.length > 0) {
+    if (sesionAsesor.paciente === paciente) {
+      await enviarMensajeTexto(
+        paciente,
+        "💬 Ya estás esperando para hablar con un asesor.\n\nTe avisaremos cuando se conecte contigo 😊"
+      );
+      return;
+    }
+
+    if (agregarPacienteAColaAsesor(paciente)) {
+      console.log("[COLA_ASESOR] Paciente agregado a cola:", {
+        paciente,
+        totalEnCola: colaEsperaAsesor.length
+      });
+      await enviarMensajeTexto(
+        paciente,
+        "💬 En este momento nuestros asesores están atendiendo a otro paciente.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
+      );
+      return;
+    }
+
+    console.log("[COLA_ASESOR] Paciente ya estaba en cola:", {
+      paciente,
+      totalEnCola: colaEsperaAsesor.length
+    });
     await enviarMensajeTexto(
       paciente,
-      "💬 En este momento nuestro asesor está atendiendo a otro paciente. Por favor intenta nuevamente en unos minutos 😊"
+      "💬 Ya estás en la cola de espera para hablar con un asesor.\n\nTe avisaremos cuando sea tu turno 😊"
     );
     return;
   }
@@ -574,16 +601,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
       const paciente = sesionAsesor.paciente;
       console.log("[ASESOR] Finaliza atencion:", { asesor: from, paciente });
 
-      await enviarBotones(
-        paciente,
-        "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
-        [boton("menu_principal", "Menú principal")]
-      );
-      resetearSesionAsesor();
-      await enviarMensajeTexto(
-        ASESOR_WHATSAPP,
-        "✅ Atención finalizada. Ya puedes recibir otro paciente."
-      );
+      await finalizarSesionAsesor("manual");
       return true;
     }
 
@@ -629,6 +647,7 @@ async function conectarAsesorConPaciente(asesor) {
     sesionAsesor.asesor,
     "✅ Te conectaste con el paciente.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar"
   );
+  reiniciarTemporizadorSesionAsesor();
 }
 
 function detectarAsesorRegistrado(texto) {
@@ -769,6 +788,135 @@ function formatearNombreAsesor(nombre) {
     .join(" ");
 }
 
+function pacienteEstaEnColaAsesor(numero) {
+  return colaEsperaAsesor.some((item) => item.paciente === numero);
+}
+
+function agregarPacienteAColaAsesor(paciente) {
+  if (pacienteEstaEnColaAsesor(paciente)) {
+    return false;
+  }
+
+  colaEsperaAsesor.push({
+    paciente,
+    creadoEn: Date.now()
+  });
+
+  return true;
+}
+
+function reiniciarTemporizadorSesionAsesor() {
+  if (temporizadorSesionAsesor) {
+    clearTimeout(temporizadorSesionAsesor);
+  }
+
+  if (sesionAsesor.estado !== "conectado" || !sesionAsesor.paciente) {
+    temporizadorSesionAsesor = null;
+    return;
+  }
+
+  temporizadorSesionAsesor = setTimeout(async () => {
+    await expirarSesionAsesorPorInactividad();
+  }, TIEMPO_EXPIRACION_ASESOR_MS);
+
+  console.log("[SESION] Temporizador de asesor reiniciado:", {
+    paciente: sesionAsesor.paciente,
+    tiempoMs: TIEMPO_EXPIRACION_ASESOR_MS
+  });
+}
+
+async function expirarSesionAsesorPorInactividad() {
+  if (sesionAsesor.estado !== "conectado" || !sesionAsesor.paciente) {
+    return;
+  }
+
+  console.log("[EXPIRACION_ASESOR] Sesion expirada por inactividad:", {
+    paciente: sesionAsesor.paciente,
+    asesor: sesionAsesor.asesor
+  });
+
+  await finalizarSesionAsesor("inactividad");
+}
+
+async function finalizarSesionAsesor(motivo = "manual") {
+  if (!sesionAsesor.paciente) {
+    resetearSesionAsesor();
+    await atenderSiguientePacienteEnCola();
+    return;
+  }
+
+  const paciente = sesionAsesor.paciente;
+  const asesor = sesionAsesor.asesor;
+
+  try {
+    if (motivo === "inactividad") {
+      await enviarBotones(
+        paciente,
+        "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta.",
+        [boton("menu_principal", "Menú principal")]
+      );
+      await enviarMensajeTexto(
+        asesor,
+        "⏱️ La atención con el paciente finalizó por inactividad."
+      );
+    } else {
+      await enviarBotones(
+        paciente,
+        "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
+        [boton("menu_principal", "Menú principal")]
+      );
+      await enviarMensajeTexto(
+        asesor,
+        "✅ Atención finalizada. Ya puedes recibir otro paciente."
+      );
+    }
+  } catch (error) {
+    console.error("[SESION] Error notificando cierre asesor:", error.response?.data || error.message);
+  }
+
+  console.log("[SESION] Finalizando sesion asesor:", {
+    motivo,
+    paciente,
+    asesor,
+    pacientesEnCola: colaEsperaAsesor.length
+  });
+
+  resetearSesionAsesor();
+  await atenderSiguientePacienteEnCola();
+}
+
+async function atenderSiguientePacienteEnCola() {
+  if (sesionAsesor.estado !== "libre" || colaEsperaAsesor.length === 0) {
+    return;
+  }
+
+  const siguiente = colaEsperaAsesor.shift();
+
+  sesionAsesor = {
+    paciente: siguiente.paciente,
+    asesor: ASESOR_WHATSAPP,
+    nombreAsesor: null,
+    cargoAsesor: null,
+    nombreTemporalAsesor: null,
+    estado: "esperando_nombre"
+  };
+
+  console.log("[COLA_ASESOR] Atendiendo siguiente paciente en cola:", {
+    paciente: sesionAsesor.paciente,
+    restantesEnCola: colaEsperaAsesor.length
+  });
+  console.log("[SESION] Asesor esperando nombre desde cola:", sesionAsesor);
+
+  await enviarMensajeTexto(
+    sesionAsesor.paciente,
+    "💬 Ya es tu turno. En un momento uno de nuestros asesores de FamySALUD se conectará contigo 😊"
+  );
+  await enviarMensajeTexto(
+    sesionAsesor.asesor,
+    "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+  );
+}
+
 async function manejarMensajePacienteAsesor(from, rawText, message) {
   if (sesionAsesor.estado !== "conectado" || from !== sesionAsesor.paciente) {
     return false;
@@ -782,6 +930,7 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
       asesor: sesionAsesor.asesor
     });
     await enviarMensajeTexto(sesionAsesor.asesor, `👤 Paciente:\n${mensaje}`);
+    reiniciarTemporizadorSesionAsesor();
     return true;
   }
 
@@ -793,12 +942,18 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
     });
     await enviarMensajeTexto(sesionAsesor.asesor, "👤 Paciente envió un archivo:");
     await reenviarMensajeMultimedia(sesionAsesor.asesor, message);
+    reiniciarTemporizadorSesionAsesor();
   }
 
   return true;
 }
 
 function resetearSesionAsesor() {
+  if (temporizadorSesionAsesor) {
+    clearTimeout(temporizadorSesionAsesor);
+    temporizadorSesionAsesor = null;
+  }
+
   sesionAsesor = {
     paciente: null,
     asesor: ASESOR_WHATSAPP,
