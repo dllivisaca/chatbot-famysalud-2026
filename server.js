@@ -380,11 +380,11 @@ app.post("/webhook", async (req, res) => {
 
     marcarMensajeProcesado(messageId, now);
 
-    if (await manejarMensajeAsesor(from, rawText)) {
+    if (await manejarMensajeAsesor(from, rawText, message)) {
       return res.sendStatus(200);
     }
 
-    if (await manejarMensajePacienteAsesor(from, rawText)) {
+    if (await manejarMensajePacienteAsesor(from, rawText, message)) {
       return res.sendStatus(200);
     }
 
@@ -508,7 +508,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId) {
   );
 }
 
-async function manejarMensajeAsesor(from, rawText) {
+async function manejarMensajeAsesor(from, rawText, message) {
   if (from !== ASESOR_WHATSAPP) {
     return false;
   }
@@ -580,6 +580,15 @@ async function manejarMensajeAsesor(from, rawText) {
         paciente: sesionAsesor.paciente
       });
       await enviarMensajeTexto(sesionAsesor.paciente, mensaje);
+      return true;
+    }
+
+    if (await reenviarMensajeMultimedia(sesionAsesor.paciente, message)) {
+      console.log("[ASESOR] Multimedia reenviado al paciente:", {
+        asesor: from,
+        paciente: sesionAsesor.paciente,
+        tipo: message.type
+      });
     }
     return true;
   }
@@ -747,7 +756,7 @@ function formatearNombreAsesor(nombre) {
     .join(" ");
 }
 
-async function manejarMensajePacienteAsesor(from, rawText) {
+async function manejarMensajePacienteAsesor(from, rawText, message) {
   if (sesionAsesor.estado !== "conectado" || from !== sesionAsesor.paciente) {
     return false;
   }
@@ -760,6 +769,17 @@ async function manejarMensajePacienteAsesor(from, rawText) {
       asesor: sesionAsesor.asesor
     });
     await enviarMensajeTexto(sesionAsesor.asesor, `👤 Paciente:\n${mensaje}`);
+    return true;
+  }
+
+  if (esMensajeMultimedia(message)) {
+    console.log("[PACIENTE] Reenviando multimedia al asesor:", {
+      paciente: from,
+      asesor: sesionAsesor.asesor,
+      tipo: message.type
+    });
+    await enviarMensajeTexto(sesionAsesor.asesor, "👤 Paciente envió un archivo:");
+    await reenviarMensajeMultimedia(sesionAsesor.asesor, message);
   }
 
   return true;
@@ -2149,6 +2169,50 @@ async function enviarMensajeTexto(to, message) {
   };
 
   await enviarWhatsApp(payload);
+}
+
+function esMensajeMultimedia(message) {
+  return ["image", "video", "audio", "document", "sticker"].includes(message?.type);
+}
+
+async function reenviarMensajeMultimedia(destino, message) {
+  const tipo = message?.type;
+
+  if (!esMensajeMultimedia(message)) {
+    return false;
+  }
+
+  const media = message[tipo];
+
+  if (!media || !media.id) {
+    console.log("[MEDIA] Mensaje multimedia sin media id:", { tipo });
+    return false;
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: destino,
+    type: tipo,
+    [tipo]: {
+      id: media.id
+    }
+  };
+
+  if ((tipo === "image" || tipo === "video" || tipo === "document") && media.caption) {
+    payload[tipo].caption = media.caption;
+  }
+
+  if (tipo === "document" && media.filename) {
+    payload.document.filename = media.filename;
+  }
+
+  console.log("[MEDIA] Reenviando multimedia:", {
+    tipo,
+    destino
+  });
+
+  await enviarWhatsApp(payload);
+  return true;
 }
 
 async function enviarWhatsApp(payload) {
