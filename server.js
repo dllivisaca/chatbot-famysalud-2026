@@ -55,6 +55,13 @@ const sesionesResultados = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
+const ASESOR_WHATSAPP = "593989729682";
+let sesionAsesor = {
+  paciente: null,
+  asesor: ASESOR_WHATSAPP,
+  nombreAsesor: null,
+  estado: "libre"
+};
 let catalogoServiciosCache = null;
 let catalogoServiciosCacheTimestamp = 0;
 
@@ -180,7 +187,7 @@ const MENUS = {
     buttons: [
       boton("paciente_ubicacion", "Ubicación"),
       boton("paciente_horarios", "Horarios"),
-      boton("paciente_asesor", "Hablar con asesor")
+      boton("paciente_hablar_asesor", "Hablar con asesor")
     ]
   },
   empresas: {
@@ -287,6 +294,7 @@ Lun-Vie: 7:30AM - 5:30PM
 Sáb: 8:00AM - 12:30PM
 
 Será un gusto atenderte 💙` },
+  paciente_hablar_asesor: { type: "advisor_chat" },
   paciente_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de FamySALUD." },
 
   empresa_salud_ocupacional: { type: "text", text: "Te brindaremos información sobre nuestros servicios de salud ocupacional." },
@@ -362,6 +370,14 @@ app.post("/webhook", async (req, res) => {
     }
 
     marcarMensajeProcesado(messageId, now);
+
+    if (await manejarMensajeAsesor(from, rawText)) {
+      return res.sendStatus(200);
+    }
+
+    if (await manejarMensajePacienteAsesor(from, rawText)) {
+      return res.sendStatus(200);
+    }
 
     const teniaSesionActiva = sesionUsuarioActiva(from);
     const teniaSessionId = Boolean(obtenerSessionId(from));
@@ -446,6 +462,133 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+async function iniciarSesionAsesor(paciente, messageId, buttonId) {
+  console.log("[PACIENTE] Solicita hablar con asesor:", { paciente, estado: sesionAsesor.estado });
+
+  if (sesionAsesor.estado !== "libre") {
+    await enviarMensajeTexto(
+      paciente,
+      "💬 En este momento nuestro asesor está atendiendo a otro paciente. Por favor intenta nuevamente en unos minutos 😊"
+    );
+    return;
+  }
+
+  sesionAsesor = {
+    paciente,
+    asesor: ASESOR_WHATSAPP,
+    nombreAsesor: null,
+    estado: "esperando_nombre"
+  };
+
+  console.log("[SESION] Asesor esperando nombre:", sesionAsesor);
+  registrarEvento(paciente, "advisor_session_requested", {
+    messageId,
+    buttonId,
+    flowKey: "paciente_hablar_asesor"
+  });
+
+  await enviarMensajeTexto(
+    paciente,
+    "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
+  );
+  await enviarMensajeTexto(
+    ASESOR_WHATSAPP,
+    "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+  );
+}
+
+async function manejarMensajeAsesor(from, rawText) {
+  if (from !== ASESOR_WHATSAPP) {
+    return false;
+  }
+
+  const mensaje = (rawText || "").trim();
+
+  if (sesionAsesor.estado === "esperando_nombre") {
+    if (!mensaje) {
+      console.log("[ASESOR] Nombre vacio ignorado.");
+      return true;
+    }
+
+    sesionAsesor.nombreAsesor = mensaje;
+    sesionAsesor.estado = "conectado";
+
+    console.log("[ASESOR] Conectado con paciente:", {
+      asesor: from,
+      paciente: sesionAsesor.paciente,
+      nombreAsesor: sesionAsesor.nombreAsesor
+    });
+    console.log("[SESION] Asesor conectado:", sesionAsesor);
+
+    await enviarMensajeTexto(
+      sesionAsesor.paciente,
+      `Hola, soy ${sesionAsesor.nombreAsesor}, asesora de FamySALUD 💙\nUn gusto atenderte. ¿En qué te puedo ayudar?`
+    );
+    await enviarMensajeTexto(
+      sesionAsesor.asesor,
+      "✅ Te conectaste con el paciente.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar"
+    );
+    return true;
+  }
+
+  if (sesionAsesor.estado === "conectado") {
+    if (mensaje.toLowerCase() === "finalizar") {
+      const paciente = sesionAsesor.paciente;
+      console.log("[ASESOR] Finaliza atencion:", { asesor: from, paciente });
+
+      await enviarMensajeTexto(
+        paciente,
+        "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙"
+      );
+      resetearSesionAsesor();
+      await enviarMensajeTexto(
+        ASESOR_WHATSAPP,
+        "✅ Atención finalizada. Ya puedes recibir otro paciente."
+      );
+      return true;
+    }
+
+    if (mensaje) {
+      console.log("[ASESOR] Reenviando mensaje al paciente:", {
+        asesor: from,
+        paciente: sesionAsesor.paciente
+      });
+      await enviarMensajeTexto(sesionAsesor.paciente, mensaje);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+async function manejarMensajePacienteAsesor(from, rawText) {
+  if (sesionAsesor.estado !== "conectado" || from !== sesionAsesor.paciente) {
+    return false;
+  }
+
+  const mensaje = (rawText || "").trim();
+
+  if (mensaje) {
+    console.log("[PACIENTE] Reenviando mensaje al asesor:", {
+      paciente: from,
+      asesor: sesionAsesor.asesor
+    });
+    await enviarMensajeTexto(sesionAsesor.asesor, `👤 Paciente:\n${mensaje}`);
+  }
+
+  return true;
+}
+
+function resetearSesionAsesor() {
+  sesionAsesor = {
+    paciente: null,
+    asesor: ASESOR_WHATSAPP,
+    nombreAsesor: null,
+    estado: "libre"
+  };
+  console.log("[SESION] Asesor libre:", sesionAsesor);
+}
+
 async function manejarBoton(to, buttonId, messageId) {
   const accion = ACCIONES_BOTONES[buttonId];
 
@@ -506,6 +649,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "patient_location") {
     await enviarUbicacionPaciente(to);
+    return;
+  }
+
+  if (accion.type === "advisor_chat") {
+    await iniciarSesionAsesor(to, messageId, buttonId);
     return;
   }
 
