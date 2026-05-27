@@ -317,7 +317,19 @@ Será un gusto atenderte 💙` },
   paciente_hablar_asesor: { type: "advisor_chat" },
   paciente_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de FamySALUD." },
 
-  empresa_salud_ocupacional: { type: "text", text: "Te brindaremos información sobre nuestros servicios de salud ocupacional." },
+  empresa_salud_ocupacional: { type: "text_with_main_menu", text: `🏢 Gracias por tu interés en nuestros servicios de Salud Ocupacional.
+
+En FamySALUD acompañamos a empresas e instituciones con atención médica preventiva, evaluaciones ocupacionales y servicios enfocados en el bienestar de sus colaboradores.
+
+Puedes conocer más sobre lo que ofrecemos aquí:
+
+🌐 Página principal:
+https://www.famysalud.com.ec/salud-ocupacional
+
+📄 Información adicional:
+https://www.famysalud.com.ec/web/paginas/salud-ocupacional
+
+Será un gusto ayudarte 💙` },
   empresa_cotizar: { type: "text", text: "Para cotizar un servicio empresarial, un asesor te contactará pronto." },
   empresa_mas_opciones_1: { type: "menu", menu: "empresasMasOpciones1" },
   empresa_resultados: { type: "text", text: "Para solicitar resultados empresariales, comparte los datos de tu empresa." },
