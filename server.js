@@ -344,7 +344,14 @@ Nuestro equipo revisará la información y se comunicará contigo lo antes posib
   empresa_resultados: { type: "company_results_request" },
   empresa_ubicacion: { type: "company_location" },
   empresa_mas_opciones_2: { type: "menu", menu: "empresasMasOpciones2" },
-  empresa_horarios: { type: "text", text: "Nuestros horarios de atención serán confirmados por un asesor." },
+  empresa_horarios: { type: "text_with_main_menu", text: `🕒 Claro, con gusto te compartimos nuestros horarios de atención.
+
+Si tu empresa o institución desea coordinar servicios, evaluaciones o atención ocupacional, estos son nuestros horarios disponibles:
+
+Lun-Vie: 7:30AM - 5:30PM
+Sáb: 8:00AM - 12:30PM
+
+Será un gusto atenderte 💙` },
   empresa_asesor: { type: "text", text: "En breve te comunicaremos con un asesor empresarial." },
 
   proveedor_propuesta: { type: "text", text: "Puedes enviar tu propuesta y nuestro equipo la revisará." },
