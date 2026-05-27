@@ -248,7 +248,7 @@ const MENUS = {
     text: "Elige una opción:",
     buttons: [
       boton("proveedor_horarios", "Horarios"),
-      boton("proveedor_asesor", "Hablar con asesor")
+      boton("proveedor_hablar_asesor", "Hablar con asesor")
     ]
   },
   alianzas: {
@@ -369,7 +369,8 @@ Lun-Vie: 7:30AM - 5:30PM
 Sáb: 8:00AM - 12:30PM
 
 Será un gusto atenderte 💙` },
-  proveedor_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de proveedores." },
+  proveedor_hablar_asesor: { type: "advisor_chat", origen: "proveedor" },
+  proveedor_asesor: { type: "advisor_chat", origen: "proveedor" },
 
   alianza_info: { type: "text", text: "Déjanos tu información y nuestro equipo evaluará la alianza." },
   alianza_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para alianzas estratégicas." },
@@ -538,7 +539,8 @@ app.post("/webhook", async (req, res) => {
 
 async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paciente") {
   const esEmpresa = origen === "empresa";
-  console.log(esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
+  const esProveedor = origen === "proveedor";
+  console.log(esProveedor ? "[PROVEEDOR_ASESOR] Solicita hablar con asesor:" : esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
     paciente,
     origen,
     estado: sesionAsesor.estado
@@ -561,7 +563,9 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       });
       await enviarMensajeTexto(
         paciente,
-        esEmpresa
+        esProveedor
+          ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
+          : esEmpresa
           ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
           : "💬 En este momento nuestros asesores están atendiendo a otro paciente.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
       );
@@ -594,18 +598,22 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   registrarEvento(paciente, "advisor_session_requested", {
     messageId,
     buttonId,
-    flowKey: esEmpresa ? "empresa_hablar_asesor" : "paciente_hablar_asesor"
+    flowKey: esProveedor ? "proveedor_hablar_asesor" : esEmpresa ? "empresa_hablar_asesor" : "paciente_hablar_asesor"
   });
 
   await enviarMensajeTexto(
     paciente,
-    esEmpresa
+    esProveedor
+      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de proveedores. Por favor espera un momento 😊"
+      : esEmpresa
       ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de servicios para empresas. Por favor espera un momento 😊"
       : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
   );
   await enviarMensajeTexto(
     ASESOR_WHATSAPP,
-    esEmpresa
+    esProveedor
+      ? "📩 Nueva solicitud de atención - PROVEEDOR\n\nUn potencial proveedor está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      : esEmpresa
       ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
   );
@@ -677,7 +685,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
       return true;
     }
 
-    if (await reenviarMensajeMultimedia(sesionAsesor.paciente, message)) {
+    if (await reenviarMensajeMultimediaSeguro(sesionAsesor.paciente, message, from)) {
       console.log("[ASESOR] Multimedia reenviado al paciente:", {
         asesor: from,
         paciente: sesionAsesor.paciente,
@@ -706,15 +714,23 @@ async function conectarAsesorConPaciente(asesor) {
 
   await enviarMensajeTexto(
     sesionAsesor.paciente,
-    origen === "empresa"
+    origen === "proveedor"
+      ? `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué podemos ayudarte con tu propuesta o consulta como proveedor?`
+      : origen === "empresa"
       ? `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué podemos ayudarte con los servicios para tu empresa o institución?`
       : `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué te puedo ayudar?`
   );
   await enviarMensajeTexto(
     sesionAsesor.asesor,
-    "✅ Te conectaste con el paciente.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar"
+    `✅ Te conectaste con ${obtenerEtiquetaOrigenAsesor(origen)}.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar`
   );
   reiniciarTemporizadorSesionAsesor();
+}
+
+function obtenerEtiquetaOrigenAsesor(origen = "paciente") {
+  if (origen === "empresa") return "la empresa";
+  if (origen === "proveedor") return "el proveedor";
+  return "el paciente";
 }
 
 function detectarAsesorRegistrado(texto) {
@@ -921,26 +937,30 @@ async function finalizarSesionAsesor(motivo = "manual") {
     if (motivo === "inactividad") {
       await enviarBotones(
         paciente,
-        origen === "empresa"
+        origen === "proveedor"
+          ? "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta como proveedor."
+          : origen === "empresa"
           ? "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta para tu empresa o institución."
           : "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta.",
         [boton("menu_principal", "Menú principal")]
       );
       await enviarMensajeTexto(
         asesor,
-        "⏱️ La atención con el paciente finalizó por inactividad."
+        `⏱️ La atención con ${obtenerEtiquetaOrigenAsesor(origen)} finalizó por inactividad.`
       );
     } else {
       await enviarBotones(
         paciente,
-        origen === "empresa"
+        origen === "proveedor"
+          ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu consulta como proveedor 💙"
+          : origen === "empresa"
           ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu solicitud empresarial 💙"
           : "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
         [boton("menu_principal", "Menú principal")]
       );
       await enviarMensajeTexto(
         asesor,
-        "✅ Atención finalizada. Ya puedes recibir otro paciente."
+        "✅ Atención finalizada. Ya puedes recibir otro chat."
       );
     }
   } catch (error) {
@@ -989,7 +1009,9 @@ async function atenderSiguientePacienteEnCola() {
   );
   await enviarMensajeTexto(
     sesionAsesor.asesor,
-    sesionAsesor.origen === "empresa"
+    sesionAsesor.origen === "proveedor"
+      ? "📩 Nueva solicitud de atención - PROVEEDOR\n\nUn potencial proveedor está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      : sesionAsesor.origen === "empresa"
       ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
   );
@@ -1004,21 +1026,21 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
   const origen = sesionAsesor.origen || "paciente";
 
   if (mensaje) {
-    console.log(origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando mensaje al asesor:" : "[PACIENTE] Reenviando mensaje al asesor:", {
+    console.log(origen === "proveedor" ? "[PROVEEDOR_ASESOR] Reenviando mensaje al asesor:" : origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando mensaje al asesor:" : "[PACIENTE] Reenviando mensaje al asesor:", {
       paciente: from,
       asesor: sesionAsesor.asesor,
       origen
     });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
+      origen === "proveedor" ? `🤝 Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
     );
     reiniciarTemporizadorSesionAsesor();
     return true;
   }
 
   if (esMensajeMultimedia(message)) {
-    console.log(origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando multimedia al asesor:" : "[PACIENTE] Reenviando multimedia al asesor:", {
+    console.log(origen === "proveedor" ? "[PROVEEDOR_ASESOR] Reenviando multimedia al asesor:" : origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando multimedia al asesor:" : "[PACIENTE] Reenviando multimedia al asesor:", {
       paciente: from,
       asesor: sesionAsesor.asesor,
       tipo: message.type,
@@ -1026,10 +1048,11 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
     });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
+      origen === "proveedor" ? "🤝 Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
     );
-    await reenviarMensajeMultimedia(sesionAsesor.asesor, message);
-    reiniciarTemporizadorSesionAsesor();
+    if (await reenviarMensajeMultimediaSeguro(sesionAsesor.asesor, message, from)) {
+      reiniciarTemporizadorSesionAsesor();
+    }
   }
 
   return true;
@@ -3114,11 +3137,36 @@ function esMensajeMultimedia(message) {
   return ["image", "video", "audio", "document", "sticker"].includes(message?.type);
 }
 
+async function reenviarMensajeMultimediaSeguro(destino, message, remitente) {
+  try {
+    return await reenviarMensajeMultimedia(destino, message);
+  } catch (error) {
+    console.warn("[MEDIA] Error reenviando multimedia:", {
+      tipo: message?.type,
+      destino,
+      error: error.response?.data || error.message
+    });
+
+    if (message?.type === "video" && remitente) {
+      await enviarMensajeTexto(
+        remitente,
+        "No pudimos reenviar ese video. Por favor intenta enviarlo nuevamente o compártelo como documento."
+      );
+    }
+
+    return false;
+  }
+}
+
 async function reenviarMensajeMultimedia(destino, message) {
   const tipo = message?.type;
 
   if (!esMensajeMultimedia(message)) {
     return false;
+  }
+
+  if (tipo === "video") {
+    return reenviarVideoWhatsApp(destino, message);
   }
 
   const media = message[tipo];
@@ -3152,6 +3200,109 @@ async function reenviarMensajeMultimedia(destino, message) {
 
   await enviarWhatsApp(payload);
   return true;
+}
+
+async function reenviarVideoWhatsApp(destino, message) {
+  const media = message?.video;
+  const mediaId = media?.id;
+  const caption = media?.caption;
+  let tempPath = null;
+
+  if (!mediaId) {
+    console.log("[MEDIA_VIDEO] Mensaje de video sin media id.");
+    return false;
+  }
+
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+    throw new Error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID para reenviar video.");
+  }
+
+  if (typeof FormData === "undefined" || typeof Blob === "undefined") {
+    throw new Error("FormData o Blob no estan disponibles. Se requiere soporte nativo de FormData o instalar form-data.");
+  }
+
+  try {
+    const mediaUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${mediaId}`;
+    const metadata = await axios.get(mediaUrl, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`
+      }
+    });
+    const downloadUrl = metadata.data?.url;
+
+    if (!downloadUrl) {
+      throw new Error("No se recibió URL temporal para descargar el video.");
+    }
+
+    const response = await axios.get(downloadUrl, {
+      responseType: "arraybuffer",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`
+      }
+    });
+    const mimeType = media.mime_type || response.headers["content-type"] || "video/mp4";
+    const tmpDir = path.join(__dirname, "tmp", "asesor-videos");
+    await fs.promises.mkdir(tmpDir, { recursive: true });
+
+    const filename = sanitizarNombreArchivoProveedor(`${Date.now()}-${mediaId}.${extensionPorMimeType(mimeType)}`);
+    tempPath = path.join(tmpDir, filename);
+    await fs.promises.writeFile(tempPath, Buffer.from(response.data));
+
+    const fileBuffer = await fs.promises.readFile(tempPath);
+    const formData = new FormData();
+    formData.append("messaging_product", "whatsapp");
+    formData.append("type", mimeType);
+    formData.append("file", new Blob([fileBuffer], { type: mimeType }), filename);
+
+    const uploadUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${PHONE_NUMBER_ID}/media`;
+    const upload = await axios.post(uploadUrl, formData, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`
+      }
+    });
+    const nuevoMediaId = upload.data?.id;
+
+    if (!nuevoMediaId) {
+      throw new Error("WhatsApp no devolvió media id al subir el video.");
+    }
+
+    const payload = {
+      messaging_product: "whatsapp",
+      to: destino,
+      type: "video",
+      video: {
+        id: nuevoMediaId
+      }
+    };
+
+    if (caption) {
+      payload.video.caption = caption;
+    }
+
+    console.log("[MEDIA_VIDEO] Reenviando video con nuevo media id:", {
+      destino,
+      originalMediaId: mediaId,
+      nuevoMediaId
+    });
+
+    await enviarWhatsApp(payload);
+    return true;
+  } catch (error) {
+    console.warn("[MEDIA_VIDEO] Error reenviando video:", {
+      destino,
+      mediaId,
+      error: error.response?.data || error.message
+    });
+    throw error;
+  } finally {
+    if (tempPath) {
+      fs.promises.unlink(tempPath).catch((error) => {
+        if (error.code !== "ENOENT") {
+          console.warn("[MEDIA_VIDEO] No se pudo eliminar video temporal:", error.message);
+        }
+      });
+    }
+  }
 }
 
 async function enviarWhatsApp(payload) {
