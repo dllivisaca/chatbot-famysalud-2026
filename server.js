@@ -342,7 +342,7 @@ Nuestro equipo revisará la información y se comunicará contigo lo antes posib
   empresa_mas_opciones_1: { type: "menu", menu: "empresasMasOpciones1" },
   empresa_solicitar_resultados: { type: "company_results_request" },
   empresa_resultados: { type: "company_results_request" },
-  empresa_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para atención empresarial." },
+  empresa_ubicacion: { type: "company_location" },
   empresa_mas_opciones_2: { type: "menu", menu: "empresasMasOpciones2" },
   empresa_horarios: { type: "text", text: "Nuestros horarios de atención serán confirmados por un asesor." },
   empresa_asesor: { type: "text", text: "En breve te comunicaremos con un asesor empresarial." },
@@ -1056,6 +1056,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "patient_location") {
     await enviarUbicacionPaciente(to);
+    return;
+  }
+
+  if (accion.type === "company_location") {
+    await enviarUbicacionEmpresa(to);
     return;
   }
 
@@ -2467,7 +2472,7 @@ ${PROMOCIONES_URL}`,
 }
 
 async function enviarUbicacionPaciente(to) {
-  await enviarMensajeTexto(
+  await enviarUbicacionFamysalud(
     to,
     `📍 ¡Será un gusto recibirte en FamySALUD!
 
@@ -2478,7 +2483,22 @@ Guayaquil, Ecuador
 
 Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
   );
+}
 
+async function enviarUbicacionEmpresa(to) {
+  await enviarUbicacionFamysalud(
+    to,
+    `📍 Claro, con gusto te compartimos nuestra ubicación.
+
+Si tu empresa o institución desea visitarnos, coordinar servicios o conocer más sobre FamySALUD, puedes encontrarnos aquí:
+
+Quisquis 1109 y José Mascote
+Guayaquil, Ecuador`
+  );
+}
+
+async function enviarUbicacionFamysalud(to, mensajeInicial) {
+  await enviarMensajeTexto(to, mensajeInicial);
   await enviarUbicacionWhatsApp(to, UBICACION_FAMYSALUD);
   await enviarImagenLocalWhatsApp(to, UBICACION_FAMYSALUD.croquisPath, "🗺️ Croquis de referencia");
   await enviarBotones(to, "¿Necesitas algo más? Puedes volver al menú principal.", [botonMenuPrincipal()]);
