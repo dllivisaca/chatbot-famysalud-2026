@@ -53,6 +53,7 @@ const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const sesionesResultados = new Map();
 const sesionesResultadosEmpresas = new Map();
+const sesionesProveedor = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
@@ -356,7 +357,7 @@ Será un gusto atenderte 💙` },
   empresa_hablar_asesor: { type: "advisor_chat", origen: "empresa" },
   empresa_asesor: { type: "advisor_chat", origen: "empresa" },
 
-  proveedor_propuesta: { type: "text", text: "Puedes enviar tu propuesta y nuestro equipo la revisará." },
+  proveedor_propuesta: { type: "provider_request" },
   proveedor_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para proveedores." },
   proveedor_mas_opciones: { type: "menu", menu: "proveedoresMasOpciones" },
   proveedor_horarios: { type: "text", text: "Nuestros horarios para proveedores serán confirmados por un asesor." },
@@ -475,6 +476,11 @@ app.post("/webhook", async (req, res) => {
 
     if (estaEnFlujoResultadosEmpresa(from)) {
       await manejarFlujoResultadosEmpresa(from, rawText, messageId);
+      return res.sendStatus(200);
+    }
+
+    if (estaEnFlujoProveedor(from)) {
+      await manejarFlujoProveedor(from, rawText, message, messageId);
       return res.sendStatus(200);
     }
 
@@ -1097,6 +1103,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "provider_request") {
+    await iniciarSolicitudProveedor(to, messageId, buttonId);
+    return;
+  }
+
   if (accion.type === "promotions") {
     await enviarPromociones(to);
     return;
@@ -1294,6 +1305,97 @@ function obtenerSesionResultadosEmpresa(from) {
 
 function estaEnFlujoResultadosEmpresa(from) {
   return Boolean(obtenerSesionResultadosEmpresa(from));
+}
+
+async function iniciarSolicitudProveedor(from, messageId, buttonId) {
+  sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
+  sesionesProveedor.set(from, {
+    paso: "proveedor_enviando_propuesta",
+    timestamp: Date.now()
+  });
+
+  console.log("[PROVEEDOR] Flujo iniciado:", { from });
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId,
+    flowKey: "proveedor",
+    payload: {
+      action: "provider_request_started"
+    }
+  });
+
+  await enviarMensajeTexto(
+    from,
+    `🤝 ¡Gracias por tu interés en ser proveedor de FamySALUD!
+
+Para revisar tu propuesta, por favor envíanos la siguiente información en un solo mensaje:
+
+1️⃣ Nombre de la empresa o proveedor  
+2️⃣ RUC o cédula  
+3️⃣ Producto o servicio que ofreces  
+4️⃣ Ciudad  
+5️⃣ Nombre de contacto  
+6️⃣ Número de contacto  
+7️⃣ Correo electrónico  
+8️⃣ Breve descripción de tu propuesta
+
+Puedes enviar también un catálogo, lista de precios o presentación si lo tienes disponible.`
+  );
+}
+
+function obtenerSesionProveedor(from) {
+  return sesionesProveedor.get(from) || null;
+}
+
+function estaEnFlujoProveedor(from) {
+  return Boolean(obtenerSesionProveedor(from));
+}
+
+async function manejarFlujoProveedor(from, text, message, messageId) {
+  const sesion = obtenerSesionProveedor(from);
+
+  if (!sesion) {
+    await iniciarSolicitudProveedor(from, messageId, "proveedor_propuesta");
+    return;
+  }
+
+  if (sesion.paso !== "proveedor_enviando_propuesta") {
+    console.log("[PROVEEDOR] Paso no reconocido:", { from, paso: sesion.paso });
+    sesionesProveedor.delete(from);
+    await enviarMenu(from, "proveedores");
+    return;
+  }
+
+  if (!text || !text.trim()) {
+    console.log("[PROVEEDOR] Mensaje no textual recibido:", {
+      from,
+      tipo: message?.type
+    });
+    await enviarMensajeTexto(
+      from,
+      "Por favor envíanos primero la información solicitada en texto para poder revisar tu propuesta."
+    );
+    return;
+  }
+
+  sesionesProveedor.delete(from);
+  await notificarSolicitudProveedor(from, text.trim());
+
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    flowKey: "proveedor",
+    payload: {
+      action: "provider_request_completed"
+    }
+  });
+
+  console.log("[PROVEEDOR] Solicitud completada:", { from });
+  await enviarMensajeConMenuPrincipal(
+    from,
+    "✅ Hemos recibido tu propuesta de proveedor.\n\nNuestro equipo revisará la información y se comunicará contigo si la propuesta se ajusta a nuestras necesidades actuales.\n\nGracias por pensar en FamySALUD 💙"
+  );
 }
 
 async function manejarFlujoResultados(from, text, buttonId, messageId) {
@@ -1608,6 +1710,34 @@ async function notificarSolicitudResultadosEmpresa(from, mensajeUsuario) {
   });
 }
 
+async function notificarSolicitudProveedor(from, mensajeUsuario) {
+  const message = construirMensajeInternoProveedor(from, mensajeUsuario);
+  const subject = "Nueva propuesta de proveedor";
+  const resultados = await Promise.allSettled([
+    enviarWhatsAppInternoResultados(message),
+    enviarCorreoInternoResultados(subject, message)
+  ]);
+  const whatsappStatus = resultados[0].status;
+  const emailStatus = resultados[1].status;
+
+  resultados.forEach((resultado, index) => {
+    const canal = index === 0 ? "[WHATSAPP_INTERNO]" : "[CORREO]";
+
+    if (resultado.status === "rejected") {
+      console.warn(canal, "Error en notificación de proveedor:", resultado.reason?.message);
+      return;
+    }
+
+    console.log(canal, "Notificación de proveedor enviada.");
+  });
+
+  console.log("[PROVEEDOR] Notificación interna procesada", {
+    fromHash: hashUsuario(from),
+    whatsappStatus,
+    emailStatus
+  });
+}
+
 function construirMensajeInternoResultados(from, datos) {
   return [
     "Nueva solicitud de resultados",
@@ -1625,9 +1755,39 @@ function construirMensajeInternoResultados(from, datos) {
   ].join("\n");
 }
 
+function construirMensajeInternoProveedor(from, mensajeUsuario) {
+  return [
+    "🤝 Nueva propuesta de proveedor",
+    "",
+    "Datos solicitados:",
+    "1️⃣ Nombre de la empresa o proveedor",
+    "2️⃣ RUC o cédula",
+    "3️⃣ Producto o servicio que ofrece",
+    "4️⃣ Ciudad",
+    "5️⃣ Nombre de contacto",
+    "6️⃣ Número de contacto",
+    "7️⃣ Correo electrónico",
+    "8️⃣ Breve descripción de la propuesta",
+    "",
+    "Datos enviados por el usuario:",
+    mensajeUsuario,
+    "",
+    "Número de WhatsApp del solicitante:",
+    from
+  ].join("\n");
+}
+
 function construirMensajeInternoResultadosEmpresa(from, mensajeUsuario) {
   return [
     "📄 Nueva solicitud de resultados - EMPRESA",
+    "",
+    "Datos solicitados:",
+    "1️⃣ Nombre de la empresa",
+    "2️⃣ RUC",
+    "3️⃣ Nombre de la persona que solicita",
+    "4️⃣ Número de contacto",
+    "5️⃣ Correo electrónico",
+    "6️⃣ Detalle de los resultados que necesita consultar",
     "",
     "Datos enviados por el usuario:",
     mensajeUsuario,
@@ -1715,6 +1875,7 @@ function limpiarSesionesUsuario(from) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  sesionesProveedor.delete(from);
   sesionesExpiradas.delete(from);
   cancelarExpiracionSesion(from);
 }
@@ -1750,6 +1911,7 @@ async function expirarSesionUsuario(from) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  sesionesProveedor.delete(from);
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
@@ -1794,6 +1956,7 @@ function consumirSesionUsuarioExpirada(from) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  sesionesProveedor.delete(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
