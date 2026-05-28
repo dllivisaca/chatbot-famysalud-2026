@@ -138,6 +138,15 @@ function registrarEvento(from, eventType, datos = {}) {
   });
 }
 
+function obtenerFlowKeyAsesor(origen = "paciente") {
+  if (origen === "alianza_existente") return "alianza_existente_hablar_asesor";
+  if (origen === "alianza_potencial") return "alianza_potencial_hablar_asesor";
+  if (origen === "proveedor_existente") return "proveedor_existente_hablar_asesor";
+  if (origen === "proveedor") return "proveedor_hablar_asesor";
+  if (origen === "empresa") return "empresa_hablar_asesor";
+  return "paciente_hablar_asesor";
+}
+
 function purgarMensajesProcesados(now = Date.now()) {
   for (const [messageId, timestamp] of mensajesProcesados) {
     if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
@@ -647,7 +656,7 @@ function obtenerSesionAsesorConectadaPorPaciente(paciente) {
   )) || null;
 }
 
-function construirSesionAsesorAsignada(asesor, paciente, origen = "paciente") {
+function construirSesionAsesorAsignada(asesor, paciente, origen = "paciente", datos = {}) {
   return {
     asesorId: asesor.id,
     paciente,
@@ -656,7 +665,10 @@ function construirSesionAsesorAsignada(asesor, paciente, origen = "paciente") {
     cargoAsesor: null,
     nombreTemporalAsesor: null,
     origen,
-    estado: "esperando_nombre"
+    estado: "esperando_nombre",
+    asignadoEn: Date.now(),
+    conectadoEn: null,
+    waitMs: Number.isFinite(datos.waitMs) ? datos.waitMs : 0
   };
 }
 
@@ -698,6 +710,16 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
         origen,
         totalEnCola: colaEsperaAsesor.length
       });
+      registrarEvento(paciente, "advisor_queued", {
+        messageId,
+        buttonId,
+        flowKey: obtenerFlowKeyAsesor(origen),
+        payload: {
+          origen,
+          queueLength: colaEsperaAsesor.length,
+          reason: "all_advisors_busy"
+        }
+      });
       await enviarMensajeTexto(
         paciente,
         esProveedor || esProveedorExistente || esAlianzaPotencial || esAlianzaExistente
@@ -727,7 +749,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   registrarEvento(paciente, "advisor_session_requested", {
     messageId,
     buttonId,
-    flowKey: esAlianzaExistente ? "alianza_existente_hablar_asesor" : esAlianzaPotencial ? "alianza_potencial_hablar_asesor" : esProveedorExistente ? "proveedor_existente_hablar_asesor" : esProveedor ? "proveedor_hablar_asesor" : esEmpresa ? "empresa_hablar_asesor" : "paciente_hablar_asesor"
+    flowKey: obtenerFlowKeyAsesor(origen)
   });
 
   await enviarMensajeTexto(
@@ -852,6 +874,7 @@ async function conectarAsesorConPaciente(asesorId, asesor) {
   sesionAsesor.nombreAsesor = asesor.nombre;
   sesionAsesor.cargoAsesor = asesor.cargo;
   sesionAsesor.estado = "conectado";
+  sesionAsesor.conectadoEn = Date.now();
   guardarSesionAsesor(asesorId, sesionAsesor);
   const origen = sesionAsesor.origen || "paciente";
 
@@ -862,6 +885,13 @@ async function conectarAsesorConPaciente(asesorId, asesor) {
     origen
   });
   console.log("[SESION] Asesor conectado:", sesionAsesor);
+  registrarEvento(sesionAsesor.paciente, "advisor_connected", {
+    flowKey: obtenerFlowKeyAsesor(origen),
+    payload: {
+      origen,
+      advisorId: sesionAsesor.asesorId
+    }
+  });
 
   await enviarMensajeTexto(
     sesionAsesor.paciente,
@@ -1101,6 +1131,8 @@ async function finalizarSesionAsesor(asesorId, motivo = "manual") {
   const paciente = sesionAsesor.paciente;
   const asesor = sesionAsesor.asesor;
   const origen = sesionAsesor.origen || "paciente";
+  const conectadoEn = sesionAsesor.conectadoEn || Date.now();
+  const durationMs = Math.max(Date.now() - conectadoEn, 0);
 
   try {
     if (motivo === "inactividad") {
@@ -1155,6 +1187,15 @@ async function finalizarSesionAsesor(asesorId, motivo = "manual") {
     origen,
     pacientesEnCola: colaEsperaAsesor.length
   });
+  registrarEvento(paciente, "advisor_finished", {
+    flowKey: obtenerFlowKeyAsesor(origen),
+    payload: {
+      origen,
+      advisorId: asesorId,
+      durationMs,
+      waitMs: Number.isFinite(sesionAsesor.waitMs) ? sesionAsesor.waitMs : 0
+    }
+  });
 
   resetearSesionAsesor(asesorId);
   await atenderSiguientePacienteEnCola(asesorId);
@@ -1169,10 +1210,11 @@ async function atenderSiguientePacienteEnCola(asesorId) {
   }
 
   const siguiente = colaEsperaAsesor.shift();
+  const waitMs = Math.max(Date.now() - (siguiente.creadoEn || Date.now()), 0);
 
   const sesionAsesor = guardarSesionAsesor(
     asesorId,
-    construirSesionAsesorAsignada(asesor, siguiente.paciente, siguiente.origen || "paciente")
+    construirSesionAsesorAsignada(asesor, siguiente.paciente, siguiente.origen || "paciente", { waitMs })
   );
 
   console.log("[COLA_ASESOR] Atendiendo siguiente paciente en cola:", {
@@ -1181,6 +1223,15 @@ async function atenderSiguientePacienteEnCola(asesorId) {
     restantesEnCola: colaEsperaAsesor.length
   });
   console.log("[SESION] Asesor esperando nombre desde cola:", sesionAsesor);
+  registrarEvento(sesionAsesor.paciente, "advisor_dequeued", {
+    flowKey: obtenerFlowKeyAsesor(sesionAsesor.origen),
+    payload: {
+      origen: sesionAsesor.origen,
+      advisorId: asesorId,
+      queueLength: colaEsperaAsesor.length,
+      waitMs
+    }
+  });
 
   await enviarMensajeTexto(
     sesionAsesor.paciente,
@@ -1391,6 +1442,17 @@ async function manejarBoton(to, buttonId, messageId) {
   }
 
   if (accion.type === "text_with_main_menu") {
+    if (buttonId === "main_trabaja") {
+      registrarEvento(to, "work_with_us_opened", {
+        messageId,
+        buttonId,
+        flowKey: "trabaja_con_nosotros",
+        payload: {
+          flowKey: "trabaja_con_nosotros"
+        }
+      });
+    }
+
     registrarEvento(to, "flow_completed", {
       messageId,
       buttonId,
@@ -2813,11 +2875,40 @@ async function enviarTipoResultado(to) {
   ]);
 }
 
+async function enviarCorreoInternoConEstadisticas(from, flowKey, subject, message, attachments = []) {
+  const payloadBase = {
+    flowKey,
+    attachmentCount: attachments.length
+  };
+
+  registrarEvento(from, "email_attempted", {
+    flowKey,
+    payload: payloadBase
+  });
+
+  try {
+    await enviarCorreoInterno(subject, message, attachments);
+    registrarEvento(from, "email_sent", {
+      flowKey,
+      payload: payloadBase
+    });
+  } catch (error) {
+    registrarEvento(from, "email_failed", {
+      flowKey,
+      payload: {
+        ...payloadBase,
+        errorType: error?.code || error?.name || "email_error"
+      }
+    });
+    throw error;
+  }
+}
+
 async function notificarSolicitudResultados(from, datos) {
   const message = construirMensajeInternoResultados(from, datos);
   const subject = "Nueva solicitud de resultados - Paciente";
   const resultados = await Promise.allSettled([
-    enviarCorreoInterno(subject, message)
+    enviarCorreoInternoConEstadisticas(from, "resultados_paciente", subject, message)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2844,7 +2935,7 @@ async function notificarSolicitudResultadosEmpresa(from, mensajeUsuario) {
   const message = construirMensajeInternoResultadosEmpresa(from, mensajeUsuario);
   const subject = "Nueva solicitud de resultados - EMPRESA";
   const resultados = await Promise.allSettled([
-    enviarCorreoInterno(subject, message)
+    enviarCorreoInternoConEstadisticas(from, "resultados_empresa", subject, message)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2868,7 +2959,7 @@ async function notificarSolicitudProveedor(from, sesion) {
   const subject = "Nueva propuesta de proveedor - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInterno(subject, message, attachments)
+    enviarCorreoInternoConEstadisticas(from, "proveedor_potencial_propuesta", subject, message, attachments)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2893,7 +2984,7 @@ async function notificarSolicitudProveedorExistente(from, sesion) {
   const subject = "Nueva solicitud de proveedor existente - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInterno(subject, message, attachments)
+    enviarCorreoInternoConEstadisticas(from, "proveedor_existente_solicitud", subject, message, attachments)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2918,7 +3009,7 @@ async function notificarSolicitudAlianza(from, sesion) {
   const subject = "Nueva propuesta de alianza estratégica - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInterno(subject, message, attachments)
+    enviarCorreoInternoConEstadisticas(from, "alianza_potencial_propuesta", subject, message, attachments)
   ]);
   const emailResult = resultados[0];
   const emailStatus = emailResult.status;
@@ -2951,7 +3042,7 @@ async function notificarSolicitudAliadoExistente(from, sesion) {
   const subject = "Nueva solicitud de aliado estratégico existente - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInterno(subject, message, attachments)
+    enviarCorreoInternoConEstadisticas(from, "alianza_existente_solicitud", subject, message, attachments)
   ]);
   const emailResult = resultados[0];
   const emailStatus = emailResult.status;
