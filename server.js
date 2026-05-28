@@ -21,8 +21,8 @@ const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
-const RESULTS_INTERNAL_EMAIL = process.env.RESULTS_INTERNAL_EMAIL;
-const RESULTS_EMAIL_FROM = process.env.RESULTS_EMAIL_FROM;
+const INTERNAL_NOTIFICATION_EMAIL = process.env.INTERNAL_NOTIFICATION_EMAIL || process.env.RESULTS_INTERNAL_EMAIL;
+const INTERNAL_EMAIL_FROM = process.env.INTERNAL_EMAIL_FROM || process.env.RESULTS_EMAIL_FROM;
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number.parseInt(process.env.SMTP_PORT || "587", 10);
 const SMTP_SECURE = flagActiva(process.env.SMTP_SECURE);
@@ -2798,7 +2798,7 @@ async function notificarSolicitudResultados(from, datos) {
   const message = construirMensajeInternoResultados(from, datos);
   const subject = "Nueva solicitud de resultados - Paciente";
   const resultados = await Promise.allSettled([
-    enviarCorreoInternoResultados(subject, message)
+    enviarCorreoInterno(subject, message)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2825,7 +2825,7 @@ async function notificarSolicitudResultadosEmpresa(from, mensajeUsuario) {
   const message = construirMensajeInternoResultadosEmpresa(from, mensajeUsuario);
   const subject = "Nueva solicitud de resultados - EMPRESA";
   const resultados = await Promise.allSettled([
-    enviarCorreoInternoResultados(subject, message)
+    enviarCorreoInterno(subject, message)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2849,7 +2849,7 @@ async function notificarSolicitudProveedor(from, sesion) {
   const subject = "Nueva propuesta de proveedor - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInternoResultados(subject, message, attachments)
+    enviarCorreoInterno(subject, message, attachments)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2874,7 +2874,7 @@ async function notificarSolicitudProveedorExistente(from, sesion) {
   const subject = "Nueva solicitud de proveedor existente - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInternoResultados(subject, message, attachments)
+    enviarCorreoInterno(subject, message, attachments)
   ]);
   const emailStatus = resultados[0].status;
 
@@ -2899,7 +2899,7 @@ async function notificarSolicitudAlianza(from, sesion) {
   const subject = "Nueva propuesta de alianza estratégica - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInternoResultados(subject, message, attachments)
+    enviarCorreoInterno(subject, message, attachments)
   ]);
   const emailResult = resultados[0];
   const emailStatus = emailResult.status;
@@ -2932,7 +2932,7 @@ async function notificarSolicitudAliadoExistente(from, sesion) {
   const subject = "Nueva solicitud de aliado estratégico existente - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarCorreoInternoResultados(subject, message, attachments)
+    enviarCorreoInterno(subject, message, attachments)
   ]);
   const emailResult = resultados[0];
   const emailStatus = emailResult.status;
@@ -3144,8 +3144,14 @@ function construirMensajeInternoResultadosEmpresa(from, mensajeUsuario) {
   ].join("\n");
 }
 
-async function enviarCorreoInternoResultados(subject, message, attachments = []) {
-  if (!RESULTS_INTERNAL_EMAIL || !RESULTS_EMAIL_FROM || !SMTP_HOST) {
+async function enviarCorreoInterno(subject, message, attachments = []) {
+  console.log("[EMAIL][CONFIG]", {
+    from: INTERNAL_EMAIL_FROM,
+    toConfigured: Boolean(INTERNAL_NOTIFICATION_EMAIL),
+    smtpHostConfigured: Boolean(SMTP_HOST)
+  });
+
+  if (!INTERNAL_NOTIFICATION_EMAIL || !INTERNAL_EMAIL_FROM || !SMTP_HOST) {
     throw new Error("Configuración SMTP incompleta.");
   }
 
@@ -3162,8 +3168,8 @@ async function enviarCorreoInternoResultados(subject, message, attachments = [])
   });
 
   await transporter.sendMail({
-    from: RESULTS_EMAIL_FROM,
-    to: RESULTS_INTERNAL_EMAIL,
+    from: INTERNAL_EMAIL_FROM,
+    to: INTERNAL_NOTIFICATION_EMAIL,
     subject,
     text: message,
     attachments
