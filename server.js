@@ -3859,15 +3859,64 @@ function formatearPrecio(valor) {
     return "Disponible con asesor";
   }
 
-  return `$${numero}`;
+  return `$${numero.toFixed(2)}`;
+}
+
+function obtenerPrecioNumerico(valor) {
+  if (valor === null || valor === undefined || valor === "") {
+    return null;
+  }
+
+  const numero = Number(valor);
+
+  return Number.isFinite(numero) ? numero : null;
+}
+
+function calcularPrecioEstandarTarjeta(valor) {
+  const numero = obtenerPrecioNumerico(valor);
+
+  if (numero === null) {
+    return null;
+  }
+
+  return Math.round((numero / 0.9425) * 100) / 100;
+}
+
+function construirBloquesPrecioServicio(servicio) {
+  const precio = obtenerPrecioNumerico(servicio.price);
+  const precioPromocional = obtenerPrecioNumerico(servicio.sale_price);
+
+  if (precio === null && precioPromocional === null) {
+    return "💲 Precio: Disponible con asesor";
+  }
+
+  const precioEstandarTarjeta = calcularPrecioEstandarTarjeta(servicio.price);
+  const bloques = [
+    "💰 ¡Ahorra según tu método de pago!",
+    `💳 Precio estándar: ${formatearPrecio(precioEstandarTarjeta)} (Pagando en línea con tarjeta)`,
+    `💵 Precio con descuento: ${formatearPrecio(servicio.price)} (Efectivo o transferencia)`
+  ];
+
+  if (tienePromocion(servicio)) {
+    bloques.push(
+      `🏷️ Precio promo especial: Desde ${formatearPrecio(servicio.sale_price)}*`,
+      `⚠️ La tarifa de ${formatearPrecio(servicio.sale_price)} es válida únicamente al agendar en línea y pagar vía transferencia. Los pagos con tarjeta en línea para esta promoción pueden tener variaciones.`
+    );
+  }
+
+  return bloques.join("\n\n");
 }
 
 function tienePromocion(servicio) {
-  if (servicio.sale_price === null || servicio.sale_price === undefined || servicio.sale_price === "") {
+  const precioPromocional = obtenerPrecioNumerico(servicio.sale_price);
+
+  if (precioPromocional === null) {
     return false;
   }
 
-  return Number(servicio.sale_price) !== Number(servicio.price);
+  const precio = obtenerPrecioNumerico(servicio.price);
+
+  return precio === null || precioPromocional !== precio;
 }
 
 function construirTextoModalidad(servicio) {
@@ -3889,12 +3938,8 @@ function construirTextoModalidad(servicio) {
 function construirMensajeDetalleServicio(servicio) {
   const bloques = [
     `📌 Servicio: ${servicio.title}`,
-    `💲 Precio: ${formatearPrecio(servicio.price)}`
+    construirBloquesPrecioServicio(servicio)
   ];
-
-  if (tienePromocion(servicio)) {
-    bloques.push(`🏷️ Promoción: ${formatearPrecio(servicio.sale_price)}`);
-  }
 
   bloques.push(construirTextoModalidad(servicio));
 
@@ -3903,10 +3948,11 @@ function construirMensajeDetalleServicio(servicio) {
   }
 
   bloques.push(`📲 ¿Necesitas ayuda personalizada?
-Si no encuentras el servicio que necesitas, nuestro equipo puede ayudarte:
 
-wa.me/593939034743
-☎️ 0939034743`);
+Si deseas más información sobre este servicio, métodos de pago o disponibilidad, nuestro equipo estará encantado de ayudarte 😊
+
+WhatsApp:
+wa.me/593939034743`);
 
   return bloques.join("\n\n");
 }
