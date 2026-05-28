@@ -1,0 +1,12 @@
+{
+  "watch": [
+    "server.js",
+    "db.js",
+    "package.json"
+  ],
+  "ignore": [
+    "data/**",
+    "data/catalogo-servicios.json"
+  ],
+  "ext": "js,json"
+}

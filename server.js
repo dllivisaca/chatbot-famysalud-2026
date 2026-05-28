@@ -37,6 +37,8 @@ const CATALOG_CACHE_TTL_MINUTES = Number.parseInt(process.env.CATALOG_CACHE_TTL_
 const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CATALOG_CACHE_TTL_MINUTES > 0
   ? CATALOG_CACHE_TTL_MINUTES
   : 10) * 60 * 1000;
+const CATALOG_CACHE_DIR = path.join(__dirname, "data");
+const CATALOG_CACHE_FILE = path.join(CATALOG_CACHE_DIR, "catalogo-servicios.json");
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
@@ -83,6 +85,7 @@ const sesionesAsesores = new Map(ASESORES_WHATSAPP.map((asesor) => [
 ]));
 let catalogoServiciosCache = null;
 let catalogoServiciosCacheTimestamp = 0;
+let catalogoServiciosRefreshInterval = null;
 
 function flagActiva(value) {
   return String(value || "").trim().toLowerCase() === "true";
@@ -3506,11 +3509,98 @@ function botonVolverCotizar() {
   return boton("volver_cotizar", "Volver a cotizar");
 }
 
-async function consultarCatalogoServicios() {
+function catalogoServiciosValido(catalogo) {
+  return Boolean(catalogo && typeof catalogo === "object" && Array.isArray(catalogo.areas));
+}
+
+async function cargarCatalogoServiciosPersistente({ usarComoFallback = false } = {}) {
+  try {
+    await fs.promises.mkdir(CATALOG_CACHE_DIR, { recursive: true });
+    const contenido = await fs.promises.readFile(CATALOG_CACHE_FILE, "utf8");
+    const catalogo = JSON.parse(contenido);
+
+    if (!catalogoServiciosValido(catalogo)) {
+      throw new Error("El archivo no contiene un catalogo valido.");
+    }
+
+    catalogoServiciosCache = catalogo;
+    catalogoServiciosCacheTimestamp = Date.now();
+
+    console.log(usarComoFallback
+      ? "[CATALOGO] Usando cache persistente local."
+      : "[CATALOGO] Cache persistente cargada.", {
+      path: CATALOG_CACHE_FILE,
+      areas: catalogo.areas.length,
+      updated_at: catalogo.updated_at
+    });
+
+    return catalogo;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.warn("[CATALOGO] Cache persistente no encontrada.", {
+        path: CATALOG_CACHE_FILE
+      });
+      return null;
+    }
+
+    console.warn("[CATALOGO] Error leyendo cache persistente.", {
+      path: CATALOG_CACHE_FILE,
+      message: error.message
+    });
+    return null;
+  }
+}
+
+async function guardarCatalogoServiciosPersistente(catalogo) {
+  try {
+    await fs.promises.mkdir(CATALOG_CACHE_DIR, { recursive: true });
+    await fs.promises.writeFile(
+      CATALOG_CACHE_FILE,
+      JSON.stringify(catalogo, null, 2),
+      "utf8"
+    );
+    console.log("[CATALOGO] Cache persistente actualizada.", {
+      path: CATALOG_CACHE_FILE,
+      areas: Array.isArray(catalogo?.areas) ? catalogo.areas.length : 0,
+      updated_at: catalogo?.updated_at
+    });
+  } catch (error) {
+    console.warn("[CATALOGO] Error actualizando cache persistente.", {
+      path: CATALOG_CACHE_FILE,
+      message: error.message
+    });
+  }
+}
+
+async function refrescarCatalogoServiciosDesdeApi() {
   if (!CHATBOT_CATALOG_URL) {
     throw new Error("CHATBOT_CATALOG_URL no esta configurada.");
   }
 
+  console.log("[CATALOGO] Consultando API.");
+
+  const response = await axios.get(CHATBOT_CATALOG_URL, {
+    timeout: 10000
+  });
+
+  if (!catalogoServiciosValido(response.data)) {
+    throw new Error("La API no devolvio un catalogo valido.");
+  }
+
+  catalogoServiciosCache = response.data;
+  catalogoServiciosCacheTimestamp = Date.now();
+  await guardarCatalogoServiciosPersistente(response.data);
+
+  console.log("[CATALOGO] Catalogo recibido:", {
+    status: response.status,
+    areas: response.data.areas.length,
+    updated_at: response.data?.updated_at
+  });
+
+  return response.data;
+}
+
+async function consultarCatalogoServicios() {
   const now = Date.now();
 
   if (catalogoServiciosCache && now - catalogoServiciosCacheTimestamp <= CATALOG_CACHE_TTL_MS) {
@@ -3521,22 +3611,7 @@ async function consultarCatalogoServicios() {
   }
 
   try {
-    console.log("[CATALOGO] Consultando API.");
-
-    const response = await axios.get(CHATBOT_CATALOG_URL, {
-      timeout: 10000
-    });
-
-    catalogoServiciosCache = response.data;
-    catalogoServiciosCacheTimestamp = Date.now();
-
-    console.log("[CATALOGO] Catalogo recibido:", {
-      status: response.status,
-      areas: Array.isArray(response.data?.areas) ? response.data.areas.length : 0,
-      updated_at: response.data?.updated_at
-    });
-
-    return response.data;
+    return await refrescarCatalogoServiciosDesdeApi();
   } catch (error) {
     if (catalogoServiciosCache) {
       console.warn("[CATALOGO] Usando cache anterior por error", {
@@ -3546,12 +3621,54 @@ async function consultarCatalogoServicios() {
       return catalogoServiciosCache;
     }
 
+    const catalogoPersistente = await cargarCatalogoServiciosPersistente({ usarComoFallback: true });
+
+    if (catalogoPersistente) {
+      return catalogoPersistente;
+    }
+
     console.error("[CATALOGO] Error sin cache disponible", {
       message: error.message,
       status: error.response?.status
     });
     throw error;
   }
+}
+
+async function refrescarCatalogoServiciosEnSegundoPlano() {
+  try {
+    await refrescarCatalogoServiciosDesdeApi();
+    console.log("[CATALOGO] Refresh automatico completado.");
+  } catch (error) {
+    console.warn("[CATALOGO] Refresh automatico fallido. Se mantiene cache previa.", {
+      message: error.message,
+      status: error.response?.status
+    });
+  }
+}
+
+function iniciarRefreshAutomaticoCatalogo() {
+  if (catalogoServiciosRefreshInterval) {
+    return;
+  }
+
+  catalogoServiciosRefreshInterval = setInterval(() => {
+    refrescarCatalogoServiciosEnSegundoPlano();
+  }, CATALOG_CACHE_TTL_MS);
+
+  if (typeof catalogoServiciosRefreshInterval.unref === "function") {
+    catalogoServiciosRefreshInterval.unref();
+  }
+
+  console.log("[CATALOGO] Refresh automatico configurado.", {
+    intervalMs: CATALOG_CACHE_TTL_MS
+  });
+}
+
+async function inicializarCatalogoServicios() {
+  await cargarCatalogoServiciosPersistente();
+  iniciarRefreshAutomaticoCatalogo();
+  refrescarCatalogoServiciosEnSegundoPlano();
 }
 
 function extraerAreasCatalogo(catalogo) {
@@ -4440,4 +4557,5 @@ app.listen(PORT, () => {
   console.log(`[CONFIG] Entorno: ${APP_ENV}`);
   console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
   console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
+  inicializarCatalogoServicios();
 });
