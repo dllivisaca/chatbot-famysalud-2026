@@ -163,12 +163,17 @@ Por favor elige una opción:`,
   empresas: "Gracias por tu interés en nuestros servicios empresariales 👨‍⚕️🏢",
   proveedores: "Gracias por tu interés en trabajar con FamySALUD 🤝",
   alianzas: "Nos alegra tu interés en generar una alianza con FamySALUD 🤝",
-  trabaja: `Gracias por tu interés en formar parte de FamySALUD 💙
+  trabaja: `💙 ¡Qué gusto saber que te gustaría formar parte de FamySALUD!
 
-Postúlate aquí:
-[LINK_GOOGLE_FORM]
+Nos encanta conocer personas con ganas de crecer y aportar con su talento.
 
-Nuestro equipo revisará tu información y te contactará si existe una vacante acorde a tu perfil.`
+Para dejarnos tu hoja de vida, por favor completa este formulario:
+
+https://forms.gle/eNZiXpEhxiauh5hE8
+
+Si tu perfil encaja con alguna vacante abierta, podremos contactarte a través de los datos que nos compartas.
+
+Y si en este momento no tenemos una oportunidad disponible para tu perfil, igual guardaremos tu CV para futuros procesos 😊`
 };
 
 const MENUS = {
@@ -318,7 +323,7 @@ const ACCIONES_BOTONES = {
   main_proveedor: { type: "menu", menu: "proveedores" },
   main_alianzas: { type: "menu", menu: "alianzasEntrada" },
   main_alianza: { type: "menu", menu: "alianzas" },
-  main_trabaja: { type: "text", text: TEXTOS.trabaja },
+  main_trabaja: { type: "text_with_main_menu", text: TEXTOS.trabaja },
   volver_cotizar: { type: "restart_quote" },
 
   paciente_agendar_cita: { type: "appointment_booking", text: `¡Perfecto! 💙
