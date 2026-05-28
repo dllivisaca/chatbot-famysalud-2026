@@ -420,7 +420,12 @@ Será un gusto atenderte 💙` },
   alianza_info: { type: "alliance_request" },
   alianza_ubicacion: { type: "alliance_location" },
   alianza_mas_opciones: { type: "menu", menu: "alianzasMasOpciones" },
-  alianza_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
+  alianza_horarios: { type: "text_with_main_menu", text: `🕒 Nuestro horario de atención en FamySALUD es:
+
+Lun-Vie: 7:30AM - 5:30PM
+Sáb: 8:00AM - 12:30PM
+
+Será un gusto conocer tu propuesta y evaluar posibles formas de colaboración con FamySALUD 💙` },
   alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." },
   alianza_existente: { type: "menu", menu: "alianzaExistente" },
   alianza_existente_solicitud: { type: "text_with_main_menu", text: "Recibimos tu solicitud como aliado estratégico. Pronto tendremos este flujo disponible." },
