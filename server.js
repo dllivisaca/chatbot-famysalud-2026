@@ -659,7 +659,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   await enviarMensajeTexto(
     ASESOR_WHATSAPP,
     esProveedor
-      ? "📩 Nueva solicitud de atención - PROVEEDOR\n\nUn potencial proveedor está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : esEmpresa
       ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
@@ -999,7 +999,7 @@ async function finalizarSesionAsesor(motivo = "manual") {
       await enviarBotones(
         paciente,
         origen === "proveedor"
-          ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu consulta como proveedor 💙"
+          ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu consulta como potencial proveedor 💙"
           : origen === "empresa"
           ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu solicitud empresarial 💙"
           : "✅ Gracias por comunicarte con FamySALUD. Ha sido un gusto atenderte 💙",
@@ -1057,7 +1057,7 @@ async function atenderSiguientePacienteEnCola() {
   await enviarMensajeTexto(
     sesionAsesor.asesor,
     sesionAsesor.origen === "proveedor"
-      ? "📩 Nueva solicitud de atención - PROVEEDOR\n\nUn potencial proveedor está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : sesionAsesor.origen === "empresa"
       ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
@@ -1080,7 +1080,7 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
     });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      origen === "proveedor" ? `🤝 Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
+      origen === "proveedor" ? `🤝 Potencial Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
     );
     reiniciarTemporizadorSesionAsesor();
     return true;
@@ -1095,7 +1095,7 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
     });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      origen === "proveedor" ? "🤝 Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
+      origen === "proveedor" ? "🤝 Potencial Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
     );
     if (await reenviarMensajeMultimediaSeguro(sesionAsesor.asesor, message, from)) {
       reiniciarTemporizadorSesionAsesor();
