@@ -506,6 +506,10 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (await manejarMensajeUsuarioEnEsperaAsesor(from)) {
+      return res.sendStatus(200);
+    }
+
     if (esNumeroInterno(from)) {
       console.log("[INTERNO] Número interno detectado. Chatbot principal omitido:", from);
       return res.sendStatus(200);
@@ -1063,6 +1067,28 @@ function formatearNombreAsesor(nombre) {
 
 function pacienteEstaEnColaAsesor(numero) {
   return colaEsperaAsesor.some((item) => item.paciente === numero);
+}
+
+async function manejarMensajeUsuarioEnEsperaAsesor(from) {
+  const sesionAsesor = obtenerSesionAsesorPorPaciente(from);
+
+  if (sesionAsesor?.estado === "esperando_nombre" || sesionAsesor?.estado === "esperando_nombre_cargo") {
+    await enviarMensajeTexto(
+      from,
+      "💬 Ya solicitaste atención con un asesor de FamySALUD.\n\nEstamos esperando que un asesor se conecte contigo. Por favor espera un momento 😊"
+    );
+    return true;
+  }
+
+  if (pacienteEstaEnColaAsesor(from)) {
+    await enviarMensajeTexto(
+      from,
+      "💬 Sigues en la cola de espera.\n\nTe avisaremos apenas un asesor esté disponible 😊"
+    );
+    return true;
+  }
+
+  return false;
 }
 
 function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
