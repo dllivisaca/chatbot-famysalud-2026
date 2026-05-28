@@ -53,6 +53,7 @@ const sesionesCotizacion = new Map();
 const sesionesResultados = new Map();
 const sesionesResultadosEmpresas = new Map();
 const sesionesProveedor = new Map();
+const sesionesAlianza = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
@@ -416,7 +417,7 @@ Será un gusto atenderte 💙` },
   proveedor_existente_solicitud: { type: "provider_existing_request" },
   proveedor_existente_asesor: { type: "advisor_chat", origen: "proveedor_existente" },
 
-  alianza_info: { type: "text", text: "Déjanos tu información y nuestro equipo evaluará la alianza." },
+  alianza_info: { type: "alliance_request" },
   alianza_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para alianzas estratégicas." },
   alianza_mas_opciones: { type: "menu", menu: "alianzasMasOpciones" },
   alianza_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
@@ -537,6 +538,11 @@ app.post("/webhook", async (req, res) => {
 
     if (estaEnFlujoProveedor(from)) {
       await manejarFlujoProveedor(from, rawText, message, messageId);
+      return res.sendStatus(200);
+    }
+
+    if (estaEnFlujoAlianza(from)) {
+      await manejarSolicitudAlianza(from, rawText, message, messageId);
       return res.sendStatus(200);
     }
 
@@ -1287,6 +1293,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "alliance_request") {
+    await iniciarSolicitudAlianza(to, messageId, buttonId);
+    return;
+  }
+
   if (accion.type === "promotions") {
     await enviarPromociones(to);
     return;
@@ -1495,6 +1506,7 @@ async function iniciarSolicitudProveedor(from, messageId, buttonId) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  limpiarSesionAlianza(from);
   sesionesProveedor.set(from, {
     tipo: "potencial",
     paso: "proveedor_esperando_texto",
@@ -1539,6 +1551,7 @@ async function iniciarSolicitudProveedorExistente(from, messageId, buttonId) {
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  limpiarSesionAlianza(from);
   sesionesProveedor.set(from, {
     tipo: "existente",
     paso: "proveedor_existente_esperando_contenido",
@@ -1786,6 +1799,266 @@ async function manejarSolicitudProveedorExistente(from, text, message, messageId
     from,
     "Puedes enviarnos la información de tu solicitud, adjuntar archivos o escribir:\nfinalizar"
   );
+}
+
+async function iniciarSolicitudAlianza(from, messageId, buttonId) {
+  sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
+  limpiarSesionProveedor(from);
+  sesionesAlianza.set(from, {
+    datosAlianza: null,
+    mensajesAdicionales: [],
+    adjuntos: [],
+    temporizador: null,
+    timestamp: Date.now()
+  });
+  reiniciarTemporizadorAlianza(from);
+
+  console.log("[ALIANZA] Flujo iniciado:", { from });
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId,
+    flowKey: "alianza",
+    payload: {
+      action: "alliance_request_started"
+    }
+  });
+
+  await enviarMensajeTexto(
+    from,
+    `🤝 ¡Gracias por tu interés en crear una alianza estratégica con FamySALUD!
+
+Para revisar tu propuesta, primero envíanos la información principal en texto, en un solo mensaje:
+
+1️⃣ Nombre de la empresa, institución o persona
+2️⃣ Tipo de alianza que deseas proponer
+3️⃣ Ciudad
+4️⃣ Nombre de contacto
+5️⃣ Número de contacto
+6️⃣ Correo electrónico
+7️⃣ Breve descripción de la propuesta
+
+📌 Después de enviar estos datos, podrás adjuntar documentos, presentaciones, imágenes o archivos adicionales si los tienes disponibles.
+
+✅ Cuando termines, escribe *finalizar* para enviar tu información.`
+  );
+}
+
+function obtenerSesionAlianza(from) {
+  return sesionesAlianza.get(from) || null;
+}
+
+function estaEnFlujoAlianza(from) {
+  return Boolean(obtenerSesionAlianza(from));
+}
+
+async function manejarSolicitudAlianza(from, text, message, messageId) {
+  const sesion = obtenerSesionAlianza(from);
+
+  if (!sesion) {
+    await iniciarSolicitudAlianza(from, messageId, "alianza_info");
+    return;
+  }
+
+  const mensaje = (text || "").trim();
+
+  if (mensaje.toLowerCase() === "finalizar") {
+    if (!solicitudAlianzaTieneContenido(sesion)) {
+      await enviarMensajeTexto(
+        from,
+        "Antes de finalizar, por favor envíanos la información principal de la alianza o adjunta un archivo de respaldo."
+      );
+      return;
+    }
+
+    await finalizarSolicitudAlianza(from, "manual", messageId);
+    return;
+  }
+
+  if (mensaje) {
+    const datosAlianza = sesion.datosAlianza || mensaje;
+    const mensajesAdicionales = sesion.datosAlianza
+      ? [...(sesion.mensajesAdicionales || []), mensaje]
+      : sesion.mensajesAdicionales || [];
+
+    sesionesAlianza.set(from, {
+      ...sesion,
+      datosAlianza,
+      mensajesAdicionales,
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorAlianza(from);
+    await enviarMensajeTexto(
+      from,
+      sesion.datosAlianza
+        ? "✅ Mensaje adicional recibido.\n\nPuedes seguir enviando información, adjuntar archivos o escribir:\nfinalizar"
+        : "✅ Hemos recibido la información principal de tu propuesta.\n\nPuedes adjuntar documentos, presentaciones, imágenes o archivos adicionales si lo deseas.\n\nCuando hayas terminado, escribe:\nfinalizar"
+    );
+    return;
+  }
+
+  if (esMensajeMultimedia(message)) {
+    console.log("[ALIANZA_ADJUNTO] Recibiendo archivo:", {
+      from,
+      tipo: message.type
+    });
+    const adjuntos = [...(sesion.adjuntos || [])];
+    try {
+      const adjunto = await descargarAdjuntoProveedor(message);
+      adjuntos.push(adjunto);
+    } catch (error) {
+      console.warn("[ALIANZA_ADJUNTO] Error descargando archivo:", error.message);
+      adjuntos.push({
+        tipo: message.type,
+        mediaId: message?.[message.type]?.id || null,
+        error: error.message,
+        caption: message?.[message.type]?.caption || ""
+      });
+    }
+    sesionesAlianza.set(from, {
+      ...sesion,
+      adjuntos,
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorAlianza(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Archivo recibido correctamente.\n\nPuedes seguir enviando información o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  await enviarMensajeTexto(
+    from,
+    "Puedes enviarnos la información principal de la alianza, adjuntar archivos o escribir:\nfinalizar"
+  );
+}
+
+function reiniciarTemporizadorAlianza(from) {
+  const sesion = obtenerSesionAlianza(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  if (sesion.temporizador) {
+    clearTimeout(sesion.temporizador);
+  }
+
+  const temporizador = setTimeout(async () => {
+    await expirarSolicitudAlianzaPorInactividad(from);
+  }, TIEMPO_EXPIRACION_PROVEEDOR_MS);
+
+  sesionesAlianza.set(from, {
+    ...sesion,
+    temporizador,
+    timestamp: Date.now()
+  });
+
+  console.log("[ALIANZA] Temporizador reiniciado:", {
+    from,
+    tiempoMs: TIEMPO_EXPIRACION_PROVEEDOR_MS
+  });
+}
+
+async function expirarSolicitudAlianzaPorInactividad(from) {
+  const sesion = obtenerSesionAlianza(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  console.log("[ALIANZA_EXPIRACION] Solicitud expirada por inactividad:", { from });
+  await finalizarSolicitudAlianza(from, "inactividad");
+}
+
+function solicitudAlianzaTieneContenido(sesion) {
+  return Boolean(
+    sesion?.datosAlianza ||
+    sesion?.mensajesAdicionales?.length ||
+    sesion?.adjuntos?.length
+  );
+}
+
+async function finalizarSolicitudAlianza(from, motivo = "manual", messageId = null) {
+  const sesion = obtenerSesionAlianza(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  if (!solicitudAlianzaTieneContenido(sesion)) {
+    limpiarSesionAlianza(from);
+    if (motivo === "inactividad") {
+      cancelarExpiracionSesion(from);
+      await enviarMensajeConMenuPrincipal(
+        from,
+        "⏱️ La recepción de tu propuesta de alianza finalizó por inactividad.\n\nNo recibimos información o adjuntos para enviar."
+      );
+    }
+    return;
+  }
+
+  try {
+    await notificarSolicitudAlianza(from, sesion);
+  } catch (error) {
+    console.error("[ALIANZA][EMAIL][ERROR] No se pudo enviar la propuesta de alianza:", {
+      fromHash: hashUsuario(from),
+      attachmentCount: sesion.adjuntos?.length || 0,
+      message: error.message
+    });
+  }
+
+  limpiarSesionAlianza(from, { eliminarAdjuntos: true });
+  if (motivo === "inactividad") {
+    cancelarExpiracionSesion(from);
+  }
+
+  if (messageId) {
+    registrarEvento(from, "flow_completed", {
+      messageId,
+      flowKey: "alianza",
+      payload: {
+        action: motivo === "inactividad" ? "alliance_request_expired" : "alliance_request_completed",
+        attachmentCount: sesion.adjuntos?.length || 0
+      }
+    });
+  }
+
+  console.log("[ALIANZA] Solicitud finalizada:", {
+    from,
+    motivo,
+    adjuntos: sesion.adjuntos?.length || 0
+  });
+
+  if (motivo === "inactividad") {
+    await enviarMensajeConMenuPrincipal(
+      from,
+      "⏱️ Tu propuesta de alianza fue enviada por tiempo de espera.\n\nHemos recibido la información enviada y la revisaremos pronto."
+    );
+    return;
+  }
+
+  await enviarMensajeConMenuPrincipal(
+    from,
+    "✅ Hemos recibido tu información para alianza estratégica.\n\nNuestro equipo la revisará y, si encaja con las necesidades actuales de FamySALUD, podremos tomarla en cuenta para una posible colaboración."
+  );
+}
+
+function limpiarSesionAlianza(from, opciones = {}) {
+  const { eliminarAdjuntos = true } = opciones;
+  const sesion = obtenerSesionAlianza(from);
+
+  if (sesion?.temporizador) {
+    clearTimeout(sesion.temporizador);
+  }
+
+  sesionesAlianza.delete(from);
+
+  if (eliminarAdjuntos && sesion?.adjuntos?.length) {
+    eliminarAdjuntosProveedor(sesion.adjuntos);
+  }
 }
 
 function reiniciarTemporizadorProveedor(from) {
@@ -2407,6 +2680,39 @@ async function notificarSolicitudProveedorExistente(from, sesion) {
   });
 }
 
+async function notificarSolicitudAlianza(from, sesion) {
+  const message = construirMensajeInternoAlianza(from, sesion);
+  const subject = "Nueva propuesta de alianza estratégica - FamySALUD";
+  const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
+  const resultados = await Promise.allSettled([
+    enviarCorreoInternoResultados(subject, message, attachments)
+  ]);
+  const emailResult = resultados[0];
+  const emailStatus = emailResult.status;
+
+  if (emailResult.status === "rejected") {
+    console.error("[ALIANZA][EMAIL][ERROR] Error enviando correo de alianza:", {
+      fromHash: hashUsuario(from),
+      subject,
+      attachmentCount: attachments.length,
+      message: emailResult.reason?.message
+    });
+    throw emailResult.reason;
+  }
+
+  console.log("[ALIANZA][EMAIL] Correo de alianza enviado.", {
+    fromHash: hashUsuario(from),
+    subject,
+    attachmentCount: attachments.length
+  });
+
+  console.log("[ALIANZA] Notificación interna procesada", {
+    fromHash: hashUsuario(from),
+    emailStatus,
+    attachmentCount: attachments.length
+  });
+}
+
 function construirMensajeInternoResultados(from, datos) {
   return [
     "Nueva solicitud de resultados",
@@ -2486,6 +2792,42 @@ function construirMensajeInternoProveedorExistente(from, sesion) {
     adjuntos.length
       ? `Se adjuntaron ${adjuntos.length} archivo(s).`
       : "No se adjuntaron archivos.",
+    ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
+    "",
+    "Número de WhatsApp del solicitante:",
+    from
+  ].join("\n");
+}
+
+function construirMensajeInternoAlianza(from, sesion) {
+  const mensajesAdicionales = sesion.mensajesAdicionales?.length
+    ? sesion.mensajesAdicionales.join("\n\n")
+    : "Sin mensajes adicionales";
+  const adjuntos = sesion.adjuntos || [];
+  const archivosConError = adjuntos
+    .filter((adjunto) => adjunto.error)
+    .map((adjunto) => `- ${adjunto.tipo || "archivo"}: ${adjunto.error}`);
+
+  return [
+    "Nueva propuesta de alianza estratégica",
+    "",
+    "Datos solicitados:",
+    "1️⃣ Nombre de la empresa, institución o persona",
+    "2️⃣ Tipo de alianza que deseas proponer",
+    "3️⃣ Ciudad",
+    "4️⃣ Nombre de contacto",
+    "5️⃣ Número de contacto",
+    "6️⃣ Correo electrónico",
+    "7️⃣ Breve descripción de la propuesta",
+    "",
+    "Datos enviados por el usuario:",
+    sesion.datosAlianza || "Sin datos principales",
+    "",
+    "Mensajes adicionales:",
+    mensajesAdicionales,
+    "",
+    "Archivos recibidos:",
+    String(adjuntos.length),
     ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
     "",
     "Número de WhatsApp del solicitante:",
@@ -2623,12 +2965,18 @@ async function expirarSesionUsuario(from) {
     return;
   }
 
+  if (obtenerSesionAlianza(from)) {
+    await expirarSolicitudAlianzaPorInactividad(from);
+    return;
+  }
+
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
+  limpiarSesionAlianza(from);
   cancelarExpiracionSesion(from);
   sesionesExpiradas.add(from);
   console.log("[SESION] Expirada", { from });
