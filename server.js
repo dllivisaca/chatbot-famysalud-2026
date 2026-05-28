@@ -426,7 +426,7 @@ Lun-Vie: 7:30AM - 5:30PM
 Sáb: 8:00AM - 12:30PM
 
 Será un gusto conocer tu propuesta y evaluar posibles formas de colaboración con FamySALUD 💙` },
-  alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." },
+  alianza_asesor: { type: "advisor_chat", origen: "alianza_potencial" },
   alianza_existente: { type: "menu", menu: "alianzaExistente" },
   alianza_existente_solicitud: { type: "text_with_main_menu", text: "Recibimos tu solicitud como aliado estratégico. Pronto tendremos este flujo disponible." },
   alianza_existente_asesor: { type: "text_with_main_menu", text: "Pronto habilitaremos la atención para aliados estratégicos registrados." }
@@ -667,8 +667,9 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   const esEmpresa = origen === "empresa";
   const esProveedor = origen === "proveedor";
   const esProveedorExistente = origen === "proveedor_existente";
+  const esAlianzaPotencial = origen === "alianza_potencial";
   const sesionExistente = obtenerSesionAsesorPorPaciente(paciente);
-  console.log(esProveedor || esProveedorExistente ? "[PROVEEDOR_ASESOR] Solicita hablar con asesor:" : esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
+  console.log(esAlianzaPotencial ? "[ALIANZA_ASESOR] Solicita hablar con asesor:" : esProveedor || esProveedorExistente ? "[PROVEEDOR_ASESOR] Solicita hablar con asesor:" : esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
     paciente,
     origen,
     asesores: obtenerEstadoAsesores()
@@ -693,7 +694,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       });
       await enviarMensajeTexto(
         paciente,
-        esProveedor || esProveedorExistente
+        esProveedor || esProveedorExistente || esAlianzaPotencial
           ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
           : esEmpresa
           ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
@@ -720,12 +721,14 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   registrarEvento(paciente, "advisor_session_requested", {
     messageId,
     buttonId,
-    flowKey: esProveedorExistente ? "proveedor_existente_hablar_asesor" : esProveedor ? "proveedor_hablar_asesor" : esEmpresa ? "empresa_hablar_asesor" : "paciente_hablar_asesor"
+    flowKey: esAlianzaPotencial ? "alianza_potencial_hablar_asesor" : esProveedorExistente ? "proveedor_existente_hablar_asesor" : esProveedor ? "proveedor_hablar_asesor" : esEmpresa ? "empresa_hablar_asesor" : "paciente_hablar_asesor"
   });
 
   await enviarMensajeTexto(
     paciente,
-    esProveedorExistente
+    esAlianzaPotencial
+      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos por una posible alianza estratégica. Por favor espera un momento 😊"
+      : esProveedorExistente
       ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos como proveedor. Por favor espera un momento 😊"
       : esProveedor
       ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de proveedores. Por favor espera un momento 😊"
@@ -735,7 +738,9 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   );
   await enviarMensajeTexto(
     sesionAsesor.asesor,
-    esProveedorExistente
+    esAlianzaPotencial
+      ? "📩 Nueva solicitud de atención - ALIANZA POTENCIAL\n\nUna persona interesada en una alianza estratégica está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      : esProveedorExistente
       ? "📩 Nueva solicitud de atención - PROVEEDOR EXISTENTE\n\nUn proveedor existente está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : esProveedor
       ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
@@ -850,7 +855,9 @@ async function conectarAsesorConPaciente(asesorId, asesor) {
 
   await enviarMensajeTexto(
     sesionAsesor.paciente,
-    origen === "proveedor_existente"
+    origen === "alianza_potencial"
+      ? `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\n\nUn gusto atenderte. ¿En qué podemos ayudarte con tu propuesta de alianza estratégica?`
+      : origen === "proveedor_existente"
       ? `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\n\nUn gusto atenderte. ¿En qué podemos ayudarte con tu consulta como proveedor existente?`
       : origen === "proveedor"
       ? `Hola, soy ${sesionAsesor.nombreAsesor}, ${sesionAsesor.cargoAsesor} de FamySALUD 💙\nUn gusto atenderte. ¿En qué podemos ayudarte con tu propuesta o consulta como proveedor?`
@@ -867,6 +874,7 @@ async function conectarAsesorConPaciente(asesorId, asesor) {
 
 function obtenerEtiquetaOrigenAsesor(origen = "paciente") {
   if (origen === "empresa") return "la empresa";
+  if (origen === "alianza_potencial") return "la alianza potencial";
   if (origen === "proveedor_existente") return "el proveedor existente";
   if (origen === "proveedor") return "el proveedor";
   return "el paciente";
@@ -1085,7 +1093,9 @@ async function finalizarSesionAsesor(asesorId, motivo = "manual") {
     if (motivo === "inactividad") {
       await enviarBotones(
         paciente,
-        origen === "proveedor_existente"
+        origen === "alianza_potencial"
+          ? "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta sobre una posible alianza estratégica."
+          : origen === "proveedor_existente"
           ? "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta como proveedor existente."
           : origen === "proveedor"
           ? "⏱️ La conversación con el asesor finalizó por inactividad.\n\nPuedes volver al menú principal si necesitas realizar otra consulta como proveedor."
@@ -1101,7 +1111,9 @@ async function finalizarSesionAsesor(asesorId, motivo = "manual") {
     } else {
       await enviarBotones(
         paciente,
-        origen === "proveedor_existente"
+        origen === "alianza_potencial"
+          ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu consulta sobre una posible alianza estratégica 💙"
+          : origen === "proveedor_existente"
           ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu consulta como proveedor existente 💙"
           : origen === "proveedor"
           ? "✅ Gracias por comunicarte con FamySALUD.\n\nHa sido un gusto atender tu consulta como potencial proveedor 💙"
@@ -1159,7 +1171,9 @@ async function atenderSiguientePacienteEnCola(asesorId) {
   );
   await enviarMensajeTexto(
     sesionAsesor.asesor,
-    sesionAsesor.origen === "proveedor_existente"
+    sesionAsesor.origen === "alianza_potencial"
+      ? "📩 Nueva solicitud de atención - ALIANZA POTENCIAL\n\nUna persona interesada en una alianza estratégica está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+      : sesionAsesor.origen === "proveedor_existente"
       ? "📩 Nueva solicitud de atención - PROVEEDOR EXISTENTE\n\nUn proveedor existente está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : sesionAsesor.origen === "proveedor"
       ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
@@ -1180,21 +1194,21 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
   const origen = sesionAsesor.origen || "paciente";
 
   if (mensaje) {
-    console.log(origen === "proveedor" || origen === "proveedor_existente" ? "[PROVEEDOR_ASESOR] Reenviando mensaje al asesor:" : origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando mensaje al asesor:" : "[PACIENTE] Reenviando mensaje al asesor:", {
+    console.log(origen === "alianza_potencial" ? "[ALIANZA_ASESOR] Reenviando mensaje al asesor:" : origen === "proveedor" || origen === "proveedor_existente" ? "[PROVEEDOR_ASESOR] Reenviando mensaje al asesor:" : origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando mensaje al asesor:" : "[PACIENTE] Reenviando mensaje al asesor:", {
       paciente: from,
       asesor: sesionAsesor.asesor,
       origen
     });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      origen === "proveedor_existente" ? `🤝 Proveedor Existente:\n${mensaje}` : origen === "proveedor" ? `🤝 Potencial Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
+      origen === "alianza_potencial" ? `🤝 Alianza Potencial:\n${mensaje}` : origen === "proveedor_existente" ? `🤝 Proveedor Existente:\n${mensaje}` : origen === "proveedor" ? `🤝 Potencial Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
     );
     reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
     return true;
   }
 
   if (esMensajeMultimedia(message)) {
-    console.log(origen === "proveedor" || origen === "proveedor_existente" ? "[PROVEEDOR_ASESOR] Reenviando multimedia al asesor:" : origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando multimedia al asesor:" : "[PACIENTE] Reenviando multimedia al asesor:", {
+    console.log(origen === "alianza_potencial" ? "[ALIANZA_ASESOR] Reenviando multimedia al asesor:" : origen === "proveedor" || origen === "proveedor_existente" ? "[PROVEEDOR_ASESOR] Reenviando multimedia al asesor:" : origen === "empresa" ? "[EMPRESA_ASESOR] Reenviando multimedia al asesor:" : "[PACIENTE] Reenviando multimedia al asesor:", {
       paciente: from,
       asesor: sesionAsesor.asesor,
       tipo: message.type,
@@ -1202,7 +1216,7 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
     });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
-      origen === "proveedor_existente" ? "🤝 Proveedor Existente envió un archivo:" : origen === "proveedor" ? "🤝 Potencial Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
+      origen === "alianza_potencial" ? "🤝 Alianza Potencial envió un archivo:" : origen === "proveedor_existente" ? "🤝 Proveedor Existente envió un archivo:" : origen === "proveedor" ? "🤝 Potencial Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
     );
     if (await reenviarMensajeMultimediaSeguro(sesionAsesor.asesor, message, from)) {
       reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
