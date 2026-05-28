@@ -413,7 +413,7 @@ Será un gusto atenderte 💙` },
   proveedor_hablar_asesor: { type: "advisor_chat", origen: "proveedor" },
   proveedor_asesor: { type: "advisor_chat", origen: "proveedor" },
   proveedor_existente: { type: "menu", menu: "proveedorExistente" },
-  proveedor_existente_solicitud: { type: "text_with_main_menu", text: "Recibimos tu solicitud como proveedor. Pronto tendremos este flujo disponible." },
+  proveedor_existente_solicitud: { type: "provider_existing_request" },
   proveedor_existente_asesor: { type: "text_with_main_menu", text: "Pronto habilitaremos la atención para proveedores registrados." },
 
   alianza_info: { type: "text", text: "Déjanos tu información y nuestro equipo evaluará la alianza." },
@@ -1268,6 +1268,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "provider_existing_request") {
+    await iniciarSolicitudProveedorExistente(to, messageId, buttonId);
+    return;
+  }
+
   if (accion.type === "promotions") {
     await enviarPromociones(to);
     return;
@@ -1477,6 +1482,7 @@ async function iniciarSolicitudProveedor(from, messageId, buttonId) {
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   sesionesProveedor.set(from, {
+    tipo: "potencial",
     paso: "proveedor_esperando_texto",
     datosProveedor: null,
     mensajesAdicionales: [],
@@ -1515,6 +1521,48 @@ Para revisar tu propuesta, primero envíanos la información principal en texto,
   );
 }
 
+async function iniciarSolicitudProveedorExistente(from, messageId, buttonId) {
+  sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
+  sesionesProveedor.set(from, {
+    tipo: "existente",
+    paso: "proveedor_existente_esperando_contenido",
+    datosProveedor: null,
+    mensajesAdicionales: [],
+    adjuntos: [],
+    temporizador: null,
+    timestamp: Date.now()
+  });
+  reiniciarTemporizadorProveedor(from);
+
+  console.log("[PROVEEDOR_EXISTENTE] Flujo iniciado:", { from });
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId,
+    flowKey: "proveedor_existente",
+    payload: {
+      action: "existing_provider_request_started"
+    }
+  });
+
+  await enviarMensajeTexto(
+    from,
+    `🤝 Gracias por comunicarte con FamySALUD.
+
+Para revisar tu solicitud como proveedor, primero envíanos la información principal en texto, en un solo mensaje:
+
+1️⃣ Nombre de la empresa o proveedor
+2️⃣ Motivo de la solicitud
+3️⃣ Detalle de lo que necesitas
+4️⃣ Nombre y número de contacto
+
+📎 Después de enviar estos datos, podrás adjuntar documentos, imágenes o archivos adicionales si lo deseas.
+
+✅ Cuando termines, escribe *finalizar* para enviar tu solicitud.`
+  );
+}
+
 function obtenerSesionProveedor(from) {
   return sesionesProveedor.get(from) || null;
 }
@@ -1538,6 +1586,11 @@ async function manejarFlujoProveedor(from, text, message, messageId) {
 
   if (sesion.paso === "proveedor_esperando_archivos") {
     await manejarArchivosProveedor(from, text, message, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "proveedor_existente_esperando_contenido") {
+    await manejarSolicitudProveedorExistente(from, text, message, messageId, sesion);
     return;
   }
 
@@ -1654,6 +1707,73 @@ async function manejarArchivosProveedor(from, text, message, messageId, sesion) 
   );
 }
 
+async function manejarSolicitudProveedorExistente(from, text, message, messageId, sesion) {
+  const mensaje = (text || "").trim();
+
+  if (mensaje.toLowerCase() === "finalizar") {
+    if (!solicitudProveedorTieneContenido(sesion)) {
+      await enviarMensajeTexto(
+        from,
+        "Antes de finalizar, por favor envíanos la información de tu solicitud o adjunta un archivo de respaldo."
+      );
+      return;
+    }
+
+    await finalizarSolicitudProveedorExistente(from, "manual", messageId);
+    return;
+  }
+
+  if (mensaje) {
+    sesionesProveedor.set(from, {
+      ...sesion,
+      mensajesAdicionales: [...(sesion.mensajesAdicionales || []), mensaje],
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorProveedor(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Mensaje recibido.\n\nPuedes seguir enviando información, adjuntar archivos o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  if (esMensajeMultimedia(message)) {
+    console.log("[PROVEEDOR_EXISTENTE_ADJUNTO] Recibiendo archivo:", {
+      from,
+      tipo: message.type
+    });
+    const adjuntos = [...(sesion.adjuntos || [])];
+    try {
+      const adjunto = await descargarAdjuntoProveedor(message);
+      adjuntos.push(adjunto);
+    } catch (error) {
+      console.warn("[PROVEEDOR_EXISTENTE_ADJUNTO] Error descargando archivo:", error.message);
+      adjuntos.push({
+        tipo: message.type,
+        mediaId: message?.[message.type]?.id || null,
+        error: error.message,
+        caption: message?.[message.type]?.caption || ""
+      });
+    }
+    sesionesProveedor.set(from, {
+      ...sesion,
+      adjuntos,
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorProveedor(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Archivo recibido correctamente.\n\nPuedes seguir enviando información o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  await enviarMensajeTexto(
+    from,
+    "Puedes enviarnos la información de tu solicitud, adjuntar archivos o escribir:\nfinalizar"
+  );
+}
+
 function reiniciarTemporizadorProveedor(from) {
   const sesion = obtenerSesionProveedor(from);
 
@@ -1682,12 +1802,27 @@ function reiniciarTemporizadorProveedor(from) {
 }
 
 async function expirarSolicitudProveedorPorInactividad(from) {
-  if (!obtenerSesionProveedor(from)) {
+  const sesion = obtenerSesionProveedor(from);
+
+  if (!sesion) {
     return;
   }
 
   console.log("[PROVEEDOR_EXPIRACION] Solicitud expirada por inactividad:", { from });
+  if (sesion.tipo === "existente") {
+    await finalizarSolicitudProveedorExistente(from, "inactividad");
+    return;
+  }
+
   await finalizarSolicitudProveedor(from, "inactividad");
+}
+
+function solicitudProveedorTieneContenido(sesion) {
+  return Boolean(
+    sesion?.datosProveedor ||
+    sesion?.mensajesAdicionales?.length ||
+    sesion?.adjuntos?.length
+  );
 }
 
 async function finalizarSolicitudProveedor(from, motivo = "manual", messageId = null) {
@@ -1736,6 +1871,67 @@ async function finalizarSolicitudProveedor(from, motivo = "manual", messageId = 
   await enviarMensajeConMenuPrincipal(
     from,
     "✅ Hemos recibido tu propuesta de proveedor.\n\nNuestro equipo revisará la información y se comunicará contigo si la propuesta se ajusta a nuestras necesidades actuales.\n\nGracias por pensar en FamySALUD 💙"
+  );
+}
+
+async function finalizarSolicitudProveedorExistente(from, motivo = "manual", messageId = null) {
+  const sesion = obtenerSesionProveedor(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  if (!solicitudProveedorTieneContenido(sesion)) {
+    limpiarSesionProveedor(from);
+    if (motivo === "inactividad") {
+      cancelarExpiracionSesion(from);
+      await enviarMensajeConMenuPrincipal(
+        from,
+        "⏱️ La solicitud como proveedor finalizó por inactividad.\n\nNo recibimos información o adjuntos para enviar."
+      );
+    }
+    return;
+  }
+
+  try {
+    await notificarSolicitudProveedorExistente(from, sesion);
+  } catch (error) {
+    console.warn("[PROVEEDOR_EXISTENTE] Error notificando solicitud:", error.message);
+  }
+
+  limpiarSesionProveedor(from, { eliminarAdjuntos: true });
+  if (motivo === "inactividad") {
+    cancelarExpiracionSesion(from);
+  }
+
+  if (messageId) {
+    registrarEvento(from, "flow_completed", {
+      messageId,
+      flowKey: "proveedor_existente",
+      payload: {
+        action: motivo === "inactividad" ? "existing_provider_request_expired" : "existing_provider_request_completed",
+        attachmentCount: sesion.adjuntos?.length || 0
+      }
+    });
+  }
+
+  console.log("[PROVEEDOR_EXISTENTE] Solicitud finalizada:", {
+    from,
+    motivo,
+    adjuntos: sesion.adjuntos?.length || 0
+  });
+
+  if (motivo === "inactividad") {
+    await enviarMensajeConMenuPrincipal(
+      from,
+      "⏱️ Tu solicitud como proveedor fue enviada por tiempo de espera.\n\nHemos recibido la información enviada y la revisaremos pronto."
+    );
+    return;
+  }
+
+  await enviarMensajeConMenuPrincipal(
+    from,
+    "✅ Gracias por comunicarte con FamySALUD.\n\nHemos recibido tu solicitud como proveedor y la revisaremos pronto."
   );
 }
 
@@ -2172,6 +2368,31 @@ async function notificarSolicitudProveedor(from, sesion) {
   });
 }
 
+async function notificarSolicitudProveedorExistente(from, sesion) {
+  const message = construirMensajeInternoProveedorExistente(from, sesion);
+  const subject = "Nueva solicitud de proveedor existente - FamySALUD";
+  const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
+  const resultados = await Promise.allSettled([
+    enviarCorreoInternoResultados(subject, message, attachments)
+  ]);
+  const emailStatus = resultados[0].status;
+
+  resultados.forEach((resultado) => {
+    if (resultado.status === "rejected") {
+      console.warn("[CORREO]", "Error en notificación de proveedor existente:", resultado.reason?.message);
+      return;
+    }
+
+    console.log("[CORREO]", "Notificación de proveedor existente enviada.");
+  });
+
+  console.log("[PROVEEDOR_EXISTENTE] Notificación interna procesada", {
+    fromHash: hashUsuario(from),
+    emailStatus,
+    attachmentCount: attachments.length
+  });
+}
+
 function construirMensajeInternoResultados(from, datos) {
   return [
     "Nueva solicitud de resultados",
@@ -2219,6 +2440,38 @@ function construirMensajeInternoProveedor(from, sesion) {
     "",
     "Archivos recibidos:",
     String(adjuntos.length),
+    ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
+    "",
+    "Número de WhatsApp del solicitante:",
+    from
+  ].join("\n");
+}
+
+function construirMensajeInternoProveedorExistente(from, sesion) {
+  const mensajes = sesion.mensajesAdicionales?.length
+    ? sesion.mensajesAdicionales.join("\n\n")
+    : "Sin mensaje de texto";
+  const adjuntos = sesion.adjuntos || [];
+  const archivosConError = adjuntos
+    .filter((adjunto) => adjunto.error)
+    .map((adjunto) => `- ${adjunto.tipo || "archivo"}: ${adjunto.error}`);
+
+  return [
+    "Nueva solicitud de proveedor existente",
+    "",
+    "Datos solicitados:",
+    "1️⃣ Nombre de la empresa o proveedor",
+    "2️⃣ Motivo de la solicitud",
+    "3️⃣ Detalle de lo que necesitas",
+    "4️⃣ Nombre y número de contacto",
+    "",
+    "Datos enviados por el usuario:",
+    mensajes,
+    "",
+    "Adjuntos:",
+    adjuntos.length
+      ? `Se adjuntaron ${adjuntos.length} archivo(s).`
+      : "No se adjuntaron archivos.",
     ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
     "",
     "Número de WhatsApp del solicitante:",
@@ -2352,7 +2605,7 @@ async function expirarSesionUsuario(from) {
   }
 
   if (obtenerSesionProveedor(from)) {
-    await finalizarSolicitudProveedor(from, "inactividad");
+    await expirarSolicitudProveedorPorInactividad(from);
     return;
   }
 
