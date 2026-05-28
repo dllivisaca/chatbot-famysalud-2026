@@ -21,7 +21,6 @@ const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
-const INTERNAL_RESULTS_WHATSAPP_TO = process.env.INTERNAL_RESULTS_WHATSAPP_TO;
 const RESULTS_INTERNAL_EMAIL = process.env.RESULTS_INTERNAL_EMAIL;
 const RESULTS_EMAIL_FROM = process.env.RESULTS_EMAIL_FROM;
 const SMTP_HOST = process.env.SMTP_HOST;
@@ -2020,16 +2019,13 @@ async function notificarSolicitudResultados(from, datos) {
   const message = construirMensajeInternoResultados(from, datos);
   const subject = "Nueva solicitud de resultados - Paciente";
   const resultados = await Promise.allSettled([
-    enviarWhatsAppInternoResultados(message),
     enviarCorreoInternoResultados(subject, message)
   ]);
-  const whatsappStatus = resultados[0].status;
-  const emailStatus = resultados[1].status;
+  const emailStatus = resultados[0].status;
 
-  resultados.forEach((resultado, index) => {
+  resultados.forEach((resultado) => {
     if (resultado.status === "rejected") {
-      console.warn("[RESULTADOS] Error en notificación interna", {
-        channel: index === 0 ? "whatsapp" : "email",
+      console.warn("[RESULTADOS] Error en notificación interna por correo", {
         tipoResultado: datos.tipoResultado,
         hasObservation: Boolean(datos.observacion),
         fromHash: hashUsuario(from),
@@ -2042,7 +2038,6 @@ async function notificarSolicitudResultados(from, datos) {
     tipoResultado: datos.tipoResultado,
     hasObservation: Boolean(datos.observacion),
     fromHash: hashUsuario(from),
-    whatsappStatus,
     emailStatus
   });
 }
@@ -2051,26 +2046,21 @@ async function notificarSolicitudResultadosEmpresa(from, mensajeUsuario) {
   const message = construirMensajeInternoResultadosEmpresa(from, mensajeUsuario);
   const subject = "Nueva solicitud de resultados - EMPRESA";
   const resultados = await Promise.allSettled([
-    enviarWhatsAppInternoResultados(message),
     enviarCorreoInternoResultados(subject, message)
   ]);
-  const whatsappStatus = resultados[0].status;
-  const emailStatus = resultados[1].status;
+  const emailStatus = resultados[0].status;
 
-  resultados.forEach((resultado, index) => {
-    const canal = index === 0 ? "[WHATSAPP_INTERNO]" : "[CORREO]";
-
+  resultados.forEach((resultado) => {
     if (resultado.status === "rejected") {
-      console.warn(canal, "Error en notificación de resultados empresa:", resultado.reason?.message);
+      console.warn("[CORREO]", "Error en notificación de resultados empresa:", resultado.reason?.message);
       return;
     }
 
-    console.log(canal, "Notificación de resultados empresa enviada.");
+    console.log("[CORREO]", "Notificación de resultados empresa enviada.");
   });
 
   console.log("[EMPRESA_RESULTADOS] Notificación interna procesada", {
     fromHash: hashUsuario(from),
-    whatsappStatus,
     emailStatus
   });
 }
@@ -2080,31 +2070,24 @@ async function notificarSolicitudProveedor(from, sesion) {
   const subject = "Nueva propuesta de proveedor - FamySALUD";
   const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
   const resultados = await Promise.allSettled([
-    enviarWhatsAppInternoResultados(message),
     enviarCorreoInternoResultados(subject, message, attachments)
   ]);
-  const whatsappStatus = resultados[0].status;
-  const emailStatus = resultados[1].status;
+  const emailStatus = resultados[0].status;
 
-  resultados.forEach((resultado, index) => {
-    const canal = index === 0 ? "[WHATSAPP_INTERNO]" : "[CORREO]";
-
+  resultados.forEach((resultado) => {
     if (resultado.status === "rejected") {
-      console.warn(canal, "Error en notificación de proveedor:", resultado.reason?.message);
+      console.warn("[CORREO]", "Error en notificación de proveedor:", resultado.reason?.message);
       return;
     }
 
-    console.log(canal, "Notificación de proveedor enviada.");
+    console.log("[CORREO]", "Notificación de proveedor enviada.");
   });
 
   console.log("[PROVEEDOR] Notificación interna procesada", {
     fromHash: hashUsuario(from),
-    whatsappStatus,
     emailStatus,
     attachmentCount: attachments.length
   });
-
-  await enviarAdjuntosProveedorWhatsApp(sesion.adjuntos || []);
 }
 
 function construirMensajeInternoResultados(from, datos) {
@@ -2171,43 +2154,6 @@ function construirAdjuntosCorreoProveedor(adjuntos) {
     }));
 }
 
-async function enviarAdjuntosProveedorWhatsApp(adjuntos) {
-  if (!adjuntos.length) {
-    return;
-  }
-
-  for (const adjunto of adjuntos) {
-    if (!adjunto.mediaId || adjunto.error) {
-      continue;
-    }
-
-    try {
-      await enviarWhatsAppInternoResultados("📎 Archivo adjunto de proveedor:");
-      await reenviarMensajeMultimedia(INTERNAL_RESULTS_WHATSAPP_TO, construirMensajeMediaProveedor(adjunto));
-    } catch (error) {
-      console.warn("[WHATSAPP_INTERNO] Error reenviando adjunto de proveedor:", error.message);
-    }
-  }
-}
-
-function construirMensajeMediaProveedor(adjunto) {
-  const tipo = adjunto.tipo;
-  const media = {
-    id: adjunto.mediaId,
-    mime_type: adjunto.mime_type,
-    caption: adjunto.caption
-  };
-
-  if (tipo === "document") {
-    media.filename = adjunto.filename;
-  }
-
-  return {
-    type: tipo,
-    [tipo]: media
-  };
-}
-
 function construirMensajeInternoResultadosEmpresa(from, mensajeUsuario) {
   return [
     "📄 Nueva solicitud de resultados - EMPRESA",
@@ -2226,21 +2172,6 @@ function construirMensajeInternoResultadosEmpresa(from, mensajeUsuario) {
     "Número de WhatsApp del solicitante:",
     from
   ].join("\n");
-}
-
-async function enviarWhatsAppInternoResultados(message) {
-  if (!INTERNAL_RESULTS_WHATSAPP_TO) {
-    throw new Error("INTERNAL_RESULTS_WHATSAPP_TO no está configurado.");
-  }
-
-  await enviarWhatsApp({
-    messaging_product: "whatsapp",
-    to: INTERNAL_RESULTS_WHATSAPP_TO,
-    type: "text",
-    text: {
-      body: message
-    }
-  });
 }
 
 async function enviarCorreoInternoResultados(subject, message, attachments = []) {
