@@ -56,13 +56,18 @@ const sesionesProveedor = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
-const ASESOR_WHATSAPP = "593989729682";
+const ASESOR_WHATSAPP_PRINCIPAL = process.env.ASESOR_WHATSAPP_PRINCIPAL || "593989729682";
+const ASESOR_WHATSAPP_SECUNDARIO = process.env.ASESOR_WHATSAPP_SECUNDARIO || "593989881894";
+const ASESORES_WHATSAPP = [
+  { id: "principal", phone: ASESOR_WHATSAPP_PRINCIPAL },
+  { id: "secundario", phone: ASESOR_WHATSAPP_SECUNDARIO }
+].filter((asesor) => Boolean(asesor.phone));
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
-let temporizadorSesionAsesor = null;
+const temporizadoresSesionAsesor = new Map();
 const NUMEROS_INTERNOS = [
-  "593989729682",
+  ...ASESORES_WHATSAPP.map((asesor) => asesor.phone),
   "593939034743"
 ];
 const ASESORES_REGISTRADOS = {
@@ -71,15 +76,10 @@ const ASESORES_REGISTRADOS = {
   daisy: { nombre: "Daisy", cargo: "asesora" },
   david: { nombre: "David", cargo: "asesor" }
 };
-let sesionAsesor = {
-  paciente: null,
-  asesor: ASESOR_WHATSAPP,
-  nombreAsesor: null,
-  cargoAsesor: null,
-  nombreTemporalAsesor: null,
-  origen: "paciente",
-  estado: "libre"
-};
+const sesionesAsesores = new Map(ASESORES_WHATSAPP.map((asesor) => [
+  asesor.id,
+  crearSesionAsesorLibre(asesor)
+]));
 let catalogoServiciosCache = null;
 let catalogoServiciosCacheTimestamp = 0;
 
@@ -584,24 +584,95 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+function crearSesionAsesorLibre(asesor) {
+  return {
+    asesorId: asesor.id,
+    paciente: null,
+    asesor: asesor.phone,
+    nombreAsesor: null,
+    cargoAsesor: null,
+    nombreTemporalAsesor: null,
+    origen: "paciente",
+    estado: "libre"
+  };
+}
+
+function obtenerAsesorPorTelefono(phone) {
+  return ASESORES_WHATSAPP.find((asesor) => asesor.phone === phone) || null;
+}
+
+function obtenerSesionAsesor(asesorId) {
+  return sesionesAsesores.get(asesorId) || null;
+}
+
+function guardarSesionAsesor(asesorId, sesion) {
+  sesionesAsesores.set(asesorId, sesion);
+  return sesion;
+}
+
+function obtenerSesionAsesorPorTelefono(phone) {
+  const asesor = obtenerAsesorPorTelefono(phone);
+  return asesor ? obtenerSesionAsesor(asesor.id) : null;
+}
+
+function obtenerAsesorLibre() {
+  return ASESORES_WHATSAPP.find((asesor) => obtenerSesionAsesor(asesor.id)?.estado === "libre") || null;
+}
+
+function obtenerSesionAsesorPorPaciente(paciente) {
+  return Array.from(sesionesAsesores.values()).find((sesion) => (
+    sesion.paciente === paciente && sesion.estado !== "libre"
+  )) || null;
+}
+
+function obtenerSesionAsesorConectadaPorPaciente(paciente) {
+  return Array.from(sesionesAsesores.values()).find((sesion) => (
+    sesion.paciente === paciente && sesion.estado === "conectado"
+  )) || null;
+}
+
+function construirSesionAsesorAsignada(asesor, paciente, origen = "paciente") {
+  return {
+    asesorId: asesor.id,
+    paciente,
+    asesor: asesor.phone,
+    nombreAsesor: null,
+    cargoAsesor: null,
+    nombreTemporalAsesor: null,
+    origen,
+    estado: "esperando_nombre"
+  };
+}
+
+function obtenerEstadoAsesores() {
+  return ASESORES_WHATSAPP.map((asesor) => ({
+    id: asesor.id,
+    phone: asesor.phone,
+    estado: obtenerSesionAsesor(asesor.id)?.estado || "sin_sesion"
+  }));
+}
+
 async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paciente") {
   const esEmpresa = origen === "empresa";
   const esProveedor = origen === "proveedor";
+  const sesionExistente = obtenerSesionAsesorPorPaciente(paciente);
   console.log(esProveedor ? "[PROVEEDOR_ASESOR] Solicita hablar con asesor:" : esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
     paciente,
     origen,
-    estado: sesionAsesor.estado
+    asesores: obtenerEstadoAsesores()
   });
 
-  if (sesionAsesor.estado !== "libre" || colaEsperaAsesor.length > 0) {
-    if (sesionAsesor.paciente === paciente) {
-      await enviarMensajeTexto(
-        paciente,
-        "💬 Ya estás esperando para hablar con un asesor.\n\nTe avisaremos cuando se conecte contigo 😊"
-      );
-      return;
-    }
+  if (sesionExistente) {
+    await enviarMensajeTexto(
+      paciente,
+      "💬 Ya estás esperando para hablar con un asesor.\n\nTe avisaremos cuando se conecte contigo 😊"
+    );
+    return;
+  }
 
+  const asesorLibre = obtenerAsesorLibre();
+
+  if (!asesorLibre || colaEsperaAsesor.length > 0) {
     if (agregarPacienteAColaAsesor(paciente, origen)) {
       console.log("[COLA_ASESOR] Paciente agregado a cola:", {
         paciente,
@@ -631,15 +702,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     return;
   }
 
-  sesionAsesor = {
-    paciente,
-    asesor: ASESOR_WHATSAPP,
-    nombreAsesor: null,
-    cargoAsesor: null,
-    nombreTemporalAsesor: null,
-    origen,
-    estado: "esperando_nombre"
-  };
+  const sesionAsesor = guardarSesionAsesor(asesorLibre.id, construirSesionAsesorAsignada(asesorLibre, paciente, origen));
 
   console.log("[SESION] Asesor esperando nombre:", sesionAsesor);
   registrarEvento(paciente, "advisor_session_requested", {
@@ -657,7 +720,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
   );
   await enviarMensajeTexto(
-    ASESOR_WHATSAPP,
+    sesionAsesor.asesor,
     esProveedor
       ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : esEmpresa
@@ -667,7 +730,9 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
 }
 
 async function manejarMensajeAsesor(from, rawText, message) {
-  if (from !== ASESOR_WHATSAPP) {
+  const sesionAsesor = obtenerSesionAsesorPorTelefono(from);
+
+  if (!sesionAsesor) {
     return false;
   }
 
@@ -682,7 +747,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
     const asesorRegistrado = detectarAsesorRegistrado(mensaje);
 
     if (asesorRegistrado) {
-      await conectarAsesorConPaciente(asesorRegistrado);
+      await conectarAsesorConPaciente(sesionAsesor.asesorId, asesorRegistrado);
       return true;
     }
 
@@ -691,6 +756,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
     console.log("[ASESOR] Nombre no reconocido:", { recibido: mensaje });
     console.log("[SESION] Esperando nombre y cargo:", sesionAsesor);
 
+    guardarSesionAsesor(sesionAsesor.asesorId, sesionAsesor);
     await enviarMensajeTexto(
       sesionAsesor.asesor,
       "No reconocí ese nombre como asesor registrado.\n\nPor favor responde con tu nombre y cargo.\nEjemplo:\nCarlos asesor\nMaría asesora"
@@ -699,7 +765,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
   }
 
   if (sesionAsesor.estado === "esperando_nombre_cargo") {
-    const asesorConCargo = extraerAsesorConCargo(mensaje);
+    const asesorConCargo = extraerAsesorConCargo(mensaje, sesionAsesor.nombreTemporalAsesor);
 
     if (!asesorConCargo) {
       console.log("[ASESOR] Falta cargo para conectar:", { recibido: mensaje });
@@ -710,7 +776,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
       return true;
     }
 
-    await conectarAsesorConPaciente(asesorConCargo);
+    await conectarAsesorConPaciente(sesionAsesor.asesorId, asesorConCargo);
     return true;
   }
 
@@ -719,7 +785,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
       const paciente = sesionAsesor.paciente;
       console.log("[ASESOR] Finaliza atencion:", { asesor: from, paciente });
 
-      await finalizarSesionAsesor("manual");
+      await finalizarSesionAsesor(sesionAsesor.asesorId, "manual");
       return true;
     }
 
@@ -745,10 +811,17 @@ async function manejarMensajeAsesor(from, rawText, message) {
   return false;
 }
 
-async function conectarAsesorConPaciente(asesor) {
+async function conectarAsesorConPaciente(asesorId, asesor) {
+  const sesionAsesor = obtenerSesionAsesor(asesorId);
+
+  if (!sesionAsesor?.paciente) {
+    return;
+  }
+
   sesionAsesor.nombreAsesor = asesor.nombre;
   sesionAsesor.cargoAsesor = asesor.cargo;
   sesionAsesor.estado = "conectado";
+  guardarSesionAsesor(asesorId, sesionAsesor);
   const origen = sesionAsesor.origen || "paciente";
 
   console.log("[ASESOR] Conectado con paciente:", {
@@ -771,7 +844,7 @@ async function conectarAsesorConPaciente(asesor) {
     sesionAsesor.asesor,
     `✅ Te conectaste con ${obtenerEtiquetaOrigenAsesor(origen)}.\n\nEscribe normalmente para responderle.\nPara cerrar la atención escribe: finalizar`
   );
-  reiniciarTemporizadorSesionAsesor();
+  reiniciarTemporizadorSesionAsesor(asesorId);
 }
 
 function obtenerEtiquetaOrigenAsesor(origen = "paciente") {
@@ -831,7 +904,7 @@ function detectarAsesorRegistrado(texto) {
   return null;
 }
 
-function extraerAsesorConCargo(texto) {
+function extraerAsesorConCargo(texto, nombreTemporalAsesor = "") {
   const mensaje = (texto || "").trim();
   const normalizado = normalizarTextoAsesor(mensaje);
   const cargo = normalizado.includes("asesora") ? "asesora" : normalizado.includes("asesor") ? "asesor" : null;
@@ -845,7 +918,7 @@ function extraerAsesorConCargo(texto) {
     .replace(/\basesor\b/gi, "")
     .trim()
     .replace(/\s+/g, " ");
-  const nombre = formatearNombreAsesor(nombreSinCargo || sesionAsesor.nombreTemporalAsesor);
+  const nombre = formatearNombreAsesor(nombreSinCargo || nombreTemporalAsesor);
 
   if (!nombre) {
     return null;
@@ -936,28 +1009,35 @@ function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
   return true;
 }
 
-function reiniciarTemporizadorSesionAsesor() {
-  if (temporizadorSesionAsesor) {
-    clearTimeout(temporizadorSesionAsesor);
+function reiniciarTemporizadorSesionAsesor(asesorId) {
+  const temporizadorActual = temporizadoresSesionAsesor.get(asesorId);
+  const sesionAsesor = obtenerSesionAsesor(asesorId);
+
+  if (temporizadorActual) {
+    clearTimeout(temporizadorActual);
   }
 
-  if (sesionAsesor.estado !== "conectado" || !sesionAsesor.paciente) {
-    temporizadorSesionAsesor = null;
+  if (sesionAsesor?.estado !== "conectado" || !sesionAsesor.paciente) {
+    temporizadoresSesionAsesor.delete(asesorId);
     return;
   }
 
-  temporizadorSesionAsesor = setTimeout(async () => {
-    await expirarSesionAsesorPorInactividad();
+  const temporizador = setTimeout(async () => {
+    await expirarSesionAsesorPorInactividad(asesorId);
   }, TIEMPO_EXPIRACION_ASESOR_MS);
+  temporizadoresSesionAsesor.set(asesorId, temporizador);
 
   console.log("[SESION] Temporizador de asesor reiniciado:", {
+    asesorId,
     paciente: sesionAsesor.paciente,
     tiempoMs: TIEMPO_EXPIRACION_ASESOR_MS
   });
 }
 
-async function expirarSesionAsesorPorInactividad() {
-  if (sesionAsesor.estado !== "conectado" || !sesionAsesor.paciente) {
+async function expirarSesionAsesorPorInactividad(asesorId) {
+  const sesionAsesor = obtenerSesionAsesor(asesorId);
+
+  if (sesionAsesor?.estado !== "conectado" || !sesionAsesor.paciente) {
     return;
   }
 
@@ -966,13 +1046,15 @@ async function expirarSesionAsesorPorInactividad() {
     asesor: sesionAsesor.asesor
   });
 
-  await finalizarSesionAsesor("inactividad");
+  await finalizarSesionAsesor(asesorId, "inactividad");
 }
 
-async function finalizarSesionAsesor(motivo = "manual") {
-  if (!sesionAsesor.paciente) {
-    resetearSesionAsesor();
-    await atenderSiguientePacienteEnCola();
+async function finalizarSesionAsesor(asesorId, motivo = "manual") {
+  const sesionAsesor = obtenerSesionAsesor(asesorId);
+
+  if (!sesionAsesor?.paciente) {
+    resetearSesionAsesor(asesorId);
+    await atenderSiguientePacienteEnCola(asesorId);
     return;
   }
 
@@ -1022,26 +1104,24 @@ async function finalizarSesionAsesor(motivo = "manual") {
     pacientesEnCola: colaEsperaAsesor.length
   });
 
-  resetearSesionAsesor();
-  await atenderSiguientePacienteEnCola();
+  resetearSesionAsesor(asesorId);
+  await atenderSiguientePacienteEnCola(asesorId);
 }
 
-async function atenderSiguientePacienteEnCola() {
-  if (sesionAsesor.estado !== "libre" || colaEsperaAsesor.length === 0) {
+async function atenderSiguientePacienteEnCola(asesorId) {
+  const asesor = ASESORES_WHATSAPP.find((item) => item.id === asesorId);
+  const sesionActual = obtenerSesionAsesor(asesorId);
+
+  if (!asesor || sesionActual?.estado !== "libre" || colaEsperaAsesor.length === 0) {
     return;
   }
 
   const siguiente = colaEsperaAsesor.shift();
 
-  sesionAsesor = {
-    paciente: siguiente.paciente,
-    asesor: ASESOR_WHATSAPP,
-    nombreAsesor: null,
-    cargoAsesor: null,
-    nombreTemporalAsesor: null,
-    origen: siguiente.origen || "paciente",
-    estado: "esperando_nombre"
-  };
+  const sesionAsesor = guardarSesionAsesor(
+    asesorId,
+    construirSesionAsesorAsignada(asesor, siguiente.paciente, siguiente.origen || "paciente")
+  );
 
   console.log("[COLA_ASESOR] Atendiendo siguiente paciente en cola:", {
     paciente: sesionAsesor.paciente,
@@ -1065,7 +1145,9 @@ async function atenderSiguientePacienteEnCola() {
 }
 
 async function manejarMensajePacienteAsesor(from, rawText, message) {
-  if (sesionAsesor.estado !== "conectado" || from !== sesionAsesor.paciente) {
+  const sesionAsesor = obtenerSesionAsesorConectadaPorPaciente(from);
+
+  if (!sesionAsesor) {
     return false;
   }
 
@@ -1082,7 +1164,7 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
       sesionAsesor.asesor,
       origen === "proveedor" ? `🤝 Potencial Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
     );
-    reiniciarTemporizadorSesionAsesor();
+    reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
     return true;
   }
 
@@ -1098,28 +1180,28 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
       origen === "proveedor" ? "🤝 Potencial Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
     );
     if (await reenviarMensajeMultimediaSeguro(sesionAsesor.asesor, message, from)) {
-      reiniciarTemporizadorSesionAsesor();
+      reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
     }
   }
 
   return true;
 }
 
-function resetearSesionAsesor() {
-  if (temporizadorSesionAsesor) {
-    clearTimeout(temporizadorSesionAsesor);
-    temporizadorSesionAsesor = null;
+function resetearSesionAsesor(asesorId) {
+  const temporizadorActual = temporizadoresSesionAsesor.get(asesorId);
+
+  if (temporizadorActual) {
+    clearTimeout(temporizadorActual);
+    temporizadoresSesionAsesor.delete(asesorId);
   }
 
-  sesionAsesor = {
-    paciente: null,
-    asesor: ASESOR_WHATSAPP,
-    nombreAsesor: null,
-    cargoAsesor: null,
-    nombreTemporalAsesor: null,
-    origen: "paciente",
-    estado: "libre"
-  };
+  const asesor = ASESORES_WHATSAPP.find((item) => item.id === asesorId);
+
+  if (!asesor) {
+    return;
+  }
+
+  const sesionAsesor = guardarSesionAsesor(asesorId, crearSesionAsesorLibre(asesor));
   console.log("[SESION] Asesor libre:", sesionAsesor);
 }
 
