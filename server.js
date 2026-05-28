@@ -184,9 +184,49 @@ const MENUS = {
   principalMasOpciones: {
     text: "Elige una opción:",
     buttons: [
-      boton("main_proveedor", "Quiero ser proveedor"),
-      boton("main_alianza", "Alianza estratégica"),
+      boton("main_proveedores", "Proveedores"),
+      boton("main_alianzas", "Alianzas estratég."),
       boton("main_trabaja", "Trabaja con nosotros")
+    ]
+  },
+  proveedoresEntrada: {
+    text: `Área de proveedores
+
+Selecciona una opción para continuar:`,
+    buttons: [
+      boton("main_proveedor", "Quiero ser proveedor"),
+      boton("proveedor_existente", "Ya soy proveedor"),
+      botonMenuPrincipal()
+    ]
+  },
+  proveedorExistente: {
+    text: `Gracias por comunicarte con FamySALUD.
+
+Si ya eres proveedor, puedes dejar una solicitud o comunicarte con un asesor.`,
+    buttons: [
+      boton("proveedor_existente_solicitud", "Dejar solicitud"),
+      boton("proveedor_existente_asesor", "Hablar con asesor"),
+      botonMenuPrincipal()
+    ]
+  },
+  alianzasEntrada: {
+    text: `Alianzas estratégicas
+
+Selecciona una opción para continuar:`,
+    buttons: [
+      boton("main_alianza", "Quiero una alianza"),
+      boton("alianza_existente", "Ya soy aliado"),
+      botonMenuPrincipal()
+    ]
+  },
+  alianzaExistente: {
+    text: `Gracias por comunicarte con FamySALUD.
+
+Si ya eres aliado estratégico, puedes dejar una solicitud o comunicarte con un asesor.`,
+    buttons: [
+      boton("alianza_existente_solicitud", "Dejar solicitud"),
+      boton("alianza_existente_asesor", "Hablar con asesor"),
+      botonMenuPrincipal()
     ]
   },
   pacientes: {
@@ -274,7 +314,9 @@ const ACCIONES_BOTONES = {
   main_atenderme: { type: "menu", menu: "pacientes" },
   main_empresas: { type: "menu", menu: "empresas" },
   main_mas_opciones: { type: "menu", menu: "principalMasOpciones" },
+  main_proveedores: { type: "menu", menu: "proveedoresEntrada" },
   main_proveedor: { type: "menu", menu: "proveedores" },
+  main_alianzas: { type: "menu", menu: "alianzasEntrada" },
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text", text: TEXTOS.trabaja },
   volver_cotizar: { type: "restart_quote" },
@@ -371,12 +413,18 @@ Sáb: 8:00AM - 12:30PM
 Será un gusto atenderte 💙` },
   proveedor_hablar_asesor: { type: "advisor_chat", origen: "proveedor" },
   proveedor_asesor: { type: "advisor_chat", origen: "proveedor" },
+  proveedor_existente: { type: "menu", menu: "proveedorExistente" },
+  proveedor_existente_solicitud: { type: "text_with_main_menu", text: "Recibimos tu solicitud como proveedor. Pronto tendremos este flujo disponible." },
+  proveedor_existente_asesor: { type: "text_with_main_menu", text: "Pronto habilitaremos la atención para proveedores registrados." },
 
   alianza_info: { type: "text", text: "Déjanos tu información y nuestro equipo evaluará la alianza." },
   alianza_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para alianzas estratégicas." },
   alianza_mas_opciones: { type: "menu", menu: "alianzasMasOpciones" },
   alianza_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
-  alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." }
+  alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." },
+  alianza_existente: { type: "menu", menu: "alianzaExistente" },
+  alianza_existente_solicitud: { type: "text_with_main_menu", text: "Recibimos tu solicitud como aliado estratégico. Pronto tendremos este flujo disponible." },
+  alianza_existente_asesor: { type: "text_with_main_menu", text: "Pronto habilitaremos la atención para aliados estratégicos registrados." }
 };
 
 // Verificacion del webhook requerida por Meta WhatsApp Cloud API.
