@@ -428,7 +428,7 @@ Sáb: 8:00AM - 12:30PM
 Será un gusto conocer tu propuesta y evaluar posibles formas de colaboración con FamySALUD 💙` },
   alianza_asesor: { type: "advisor_chat", origen: "alianza_potencial" },
   alianza_existente: { type: "menu", menu: "alianzaExistente" },
-  alianza_existente_solicitud: { type: "text_with_main_menu", text: "Recibimos tu solicitud como aliado estratégico. Pronto tendremos este flujo disponible." },
+  alianza_existente_solicitud: { type: "existing_ally_request" },
   alianza_existente_asesor: { type: "text_with_main_menu", text: "Pronto habilitaremos la atención para aliados estratégicos registrados." }
 };
 
@@ -1317,6 +1317,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "existing_ally_request") {
+    await iniciarSolicitudAliadoExistente(to, messageId, buttonId);
+    return;
+  }
+
   if (accion.type === "promotions") {
     await enviarPromociones(to);
     return;
@@ -1831,6 +1836,7 @@ async function iniciarSolicitudAlianza(from, messageId, buttonId) {
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
   sesionesAlianza.set(from, {
+    tipo: "potencial",
     datosAlianza: null,
     mensajesAdicionales: [],
     adjuntos: [],
@@ -1869,6 +1875,48 @@ Para revisar tu propuesta, primero envíanos la información principal en texto,
   );
 }
 
+async function iniciarSolicitudAliadoExistente(from, messageId, buttonId) {
+  sesionesCotizacion.delete(from);
+  sesionesResultados.delete(from);
+  sesionesResultadosEmpresas.delete(from);
+  limpiarSesionProveedor(from);
+  sesionesAlianza.set(from, {
+    tipo: "existente",
+    datosAlianza: null,
+    mensajesAdicionales: [],
+    adjuntos: [],
+    temporizador: null,
+    timestamp: Date.now()
+  });
+  reiniciarTemporizadorAlianza(from);
+
+  console.log("[ALIADO_EXISTENTE] Flujo iniciado:", { from });
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    buttonId,
+    flowKey: "aliado_existente",
+    payload: {
+      action: "existing_ally_request_started"
+    }
+  });
+
+  await enviarMensajeTexto(
+    from,
+    `🤝 Gracias por comunicarte con FamySALUD.
+
+Para revisar tu solicitud como aliado estratégico, primero envíanos la información principal en texto, en un solo mensaje:
+
+1️⃣ Nombre de la empresa, institución o aliado
+2️⃣ Motivo de la solicitud
+3️⃣ Detalle de lo que necesitas
+4️⃣ Nombre y número de contacto
+
+📎 Después de enviar estos datos, podrás adjuntar documentos, imágenes o archivos adicionales si lo deseas.
+
+✅ Cuando termines, escribe *finalizar* para enviar tu solicitud.`
+  );
+}
+
 function obtenerSesionAlianza(from) {
   return sesionesAlianza.get(from) || null;
 }
@@ -1882,6 +1930,11 @@ async function manejarSolicitudAlianza(from, text, message, messageId) {
 
   if (!sesion) {
     await iniciarSolicitudAlianza(from, messageId, "alianza_info");
+    return;
+  }
+
+  if (sesion.tipo === "existente") {
+    await manejarSolicitudAliadoExistente(from, text, message, messageId, sesion);
     return;
   }
 
@@ -1959,6 +2012,73 @@ async function manejarSolicitudAlianza(from, text, message, messageId) {
   );
 }
 
+async function manejarSolicitudAliadoExistente(from, text, message, messageId, sesion) {
+  const mensaje = (text || "").trim();
+
+  if (mensaje.toLowerCase() === "finalizar") {
+    if (!solicitudAlianzaTieneContenido(sesion)) {
+      await enviarMensajeTexto(
+        from,
+        "Antes de finalizar, por favor envíanos la información principal de tu solicitud o adjunta un archivo de respaldo."
+      );
+      return;
+    }
+
+    await finalizarSolicitudAliadoExistente(from, "manual", messageId);
+    return;
+  }
+
+  if (mensaje) {
+    sesionesAlianza.set(from, {
+      ...sesion,
+      mensajesAdicionales: [...(sesion.mensajesAdicionales || []), mensaje],
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorAlianza(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Mensaje recibido.\n\nPuedes seguir enviando información, adjuntar archivos o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  if (esMensajeMultimedia(message)) {
+    console.log("[ALIADO_EXISTENTE_ADJUNTO] Recibiendo archivo:", {
+      from,
+      tipo: message.type
+    });
+    const adjuntos = [...(sesion.adjuntos || [])];
+    try {
+      const adjunto = await descargarAdjuntoProveedor(message);
+      adjuntos.push(adjunto);
+    } catch (error) {
+      console.warn("[ALIADO_EXISTENTE_ADJUNTO] Error descargando archivo:", error.message);
+      adjuntos.push({
+        tipo: message.type,
+        mediaId: message?.[message.type]?.id || null,
+        error: error.message,
+        caption: message?.[message.type]?.caption || ""
+      });
+    }
+    sesionesAlianza.set(from, {
+      ...sesion,
+      adjuntos,
+      timestamp: Date.now()
+    });
+    reiniciarTemporizadorAlianza(from);
+    await enviarMensajeTexto(
+      from,
+      "✅ Archivo recibido correctamente.\n\nPuedes seguir enviando información o escribir:\nfinalizar"
+    );
+    return;
+  }
+
+  await enviarMensajeTexto(
+    from,
+    "Puedes enviarnos la información de tu solicitud, adjuntar archivos o escribir:\nfinalizar"
+  );
+}
+
 function reiniciarTemporizadorAlianza(from) {
   const sesion = obtenerSesionAlianza(from);
 
@@ -1994,6 +2114,11 @@ async function expirarSolicitudAlianzaPorInactividad(from) {
   }
 
   console.log("[ALIANZA_EXPIRACION] Solicitud expirada por inactividad:", { from });
+  if (sesion.tipo === "existente") {
+    await finalizarSolicitudAliadoExistente(from, "inactividad");
+    return;
+  }
+
   await finalizarSolicitudAlianza(from, "inactividad");
 }
 
@@ -2067,6 +2192,71 @@ async function finalizarSolicitudAlianza(from, motivo = "manual", messageId = nu
   await enviarMensajeConMenuPrincipal(
     from,
     "✅ Hemos recibido tu información para alianza estratégica.\n\nNuestro equipo la revisará y, si encaja con las necesidades actuales de FamySALUD, podremos tomarla en cuenta para una posible colaboración."
+  );
+}
+
+async function finalizarSolicitudAliadoExistente(from, motivo = "manual", messageId = null) {
+  const sesion = obtenerSesionAlianza(from);
+
+  if (!sesion) {
+    return;
+  }
+
+  if (!solicitudAlianzaTieneContenido(sesion)) {
+    limpiarSesionAlianza(from);
+    if (motivo === "inactividad") {
+      cancelarExpiracionSesion(from);
+      await enviarMensajeConMenuPrincipal(
+        from,
+        "⏱️ La solicitud como aliado estratégico finalizó por inactividad.\n\nNo recibimos información o adjuntos para enviar."
+      );
+    }
+    return;
+  }
+
+  try {
+    await notificarSolicitudAliadoExistente(from, sesion);
+  } catch (error) {
+    console.error("[ALIADO_EXISTENTE][EMAIL][ERROR] No se pudo enviar la solicitud:", {
+      fromHash: hashUsuario(from),
+      attachmentCount: sesion.adjuntos?.length || 0,
+      message: error.message
+    });
+  }
+
+  limpiarSesionAlianza(from, { eliminarAdjuntos: true });
+  if (motivo === "inactividad") {
+    cancelarExpiracionSesion(from);
+  }
+
+  if (messageId) {
+    registrarEvento(from, "flow_completed", {
+      messageId,
+      flowKey: "aliado_existente",
+      payload: {
+        action: motivo === "inactividad" ? "existing_ally_request_expired" : "existing_ally_request_completed",
+        attachmentCount: sesion.adjuntos?.length || 0
+      }
+    });
+  }
+
+  console.log("[ALIADO_EXISTENTE] Solicitud finalizada:", {
+    from,
+    motivo,
+    adjuntos: sesion.adjuntos?.length || 0
+  });
+
+  if (motivo === "inactividad") {
+    await enviarMensajeConMenuPrincipal(
+      from,
+      "⏱️ Tu solicitud como aliado estratégico fue enviada por tiempo de espera.\n\nHemos recibido la información enviada y la revisaremos pronto."
+    );
+    return;
+  }
+
+  await enviarMensajeConMenuPrincipal(
+    from,
+    "✅ Gracias por comunicarte con FamySALUD.\n\nHemos recibido tu solicitud como aliado estratégico y la revisaremos pronto."
   );
 }
 
@@ -2737,6 +2927,39 @@ async function notificarSolicitudAlianza(from, sesion) {
   });
 }
 
+async function notificarSolicitudAliadoExistente(from, sesion) {
+  const message = construirMensajeInternoAliadoExistente(from, sesion);
+  const subject = "Nueva solicitud de aliado estratégico existente - FamySALUD";
+  const attachments = construirAdjuntosCorreoProveedor(sesion.adjuntos || []);
+  const resultados = await Promise.allSettled([
+    enviarCorreoInternoResultados(subject, message, attachments)
+  ]);
+  const emailResult = resultados[0];
+  const emailStatus = emailResult.status;
+
+  if (emailResult.status === "rejected") {
+    console.error("[ALIADO_EXISTENTE][EMAIL][ERROR] Error enviando correo:", {
+      fromHash: hashUsuario(from),
+      subject,
+      attachmentCount: attachments.length,
+      message: emailResult.reason?.message
+    });
+    throw emailResult.reason;
+  }
+
+  console.log("[ALIADO_EXISTENTE][EMAIL] Correo enviado.", {
+    fromHash: hashUsuario(from),
+    subject,
+    attachmentCount: attachments.length
+  });
+
+  console.log("[ALIADO_EXISTENTE] Notificación interna procesada", {
+    fromHash: hashUsuario(from),
+    emailStatus,
+    attachmentCount: attachments.length
+  });
+}
+
 function construirMensajeInternoResultados(from, datos) {
   return [
     "Nueva solicitud de resultados",
@@ -2852,6 +3075,38 @@ function construirMensajeInternoAlianza(from, sesion) {
     "",
     "Archivos recibidos:",
     String(adjuntos.length),
+    ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
+    "",
+    "Número de WhatsApp del solicitante:",
+    from
+  ].join("\n");
+}
+
+function construirMensajeInternoAliadoExistente(from, sesion) {
+  const mensajes = sesion.mensajesAdicionales?.length
+    ? sesion.mensajesAdicionales.join("\n\n")
+    : "Sin mensaje de texto";
+  const adjuntos = sesion.adjuntos || [];
+  const archivosConError = adjuntos
+    .filter((adjunto) => adjunto.error)
+    .map((adjunto) => `- ${adjunto.tipo || "archivo"}: ${adjunto.error}`);
+
+  return [
+    "Nueva solicitud de aliado estratégico existente",
+    "",
+    "Datos solicitados:",
+    "1️⃣ Nombre de la empresa, institución o aliado",
+    "2️⃣ Motivo de la solicitud",
+    "3️⃣ Detalle de lo que necesitas",
+    "4️⃣ Nombre y número de contacto",
+    "",
+    "Datos enviados por el usuario:",
+    mensajes,
+    "",
+    "Adjuntos:",
+    adjuntos.length
+      ? `Se adjuntaron ${adjuntos.length} archivo(s).`
+      : "No se adjuntaron archivos.",
     ...(archivosConError.length ? ["", "Notas de adjuntos:", ...archivosConError] : []),
     "",
     "Número de WhatsApp del solicitante:",
