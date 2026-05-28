@@ -418,7 +418,7 @@ Será un gusto atenderte 💙` },
   proveedor_existente_asesor: { type: "advisor_chat", origen: "proveedor_existente" },
 
   alianza_info: { type: "alliance_request" },
-  alianza_ubicacion: { type: "text", text: "Te compartiremos nuestra ubicación para alianzas estratégicas." },
+  alianza_ubicacion: { type: "alliance_location" },
   alianza_mas_opciones: { type: "menu", menu: "alianzasMasOpciones" },
   alianza_horarios: { type: "text", text: "Nuestros horarios serán confirmados por un asesor." },
   alianza_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de alianzas." },
@@ -1315,6 +1315,11 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "provider_location") {
     await enviarUbicacionProveedor(to);
+    return;
+  }
+
+  if (accion.type === "alliance_location") {
+    await enviarUbicacionAlianza(to);
     return;
   }
 
@@ -3779,6 +3784,18 @@ async function enviarUbicacionProveedor(to) {
     `📍 Claro, con gusto te compartimos nuestra ubicación.
 
 Si deseas visitarnos para presentar productos, coordinar una propuesta o conocer más sobre FamySALUD, puedes encontrarnos aquí:
+
+Quisquis 1109 y José Mascote
+Guayaquil, Ecuador`
+  );
+}
+
+async function enviarUbicacionAlianza(to) {
+  await enviarUbicacionFamysalud(
+    to,
+    `📍 Estamos ubicados en Guayaquil.
+
+Si estás interesado en crear una alianza estratégica con FamySALUD, puedes tomar como referencia nuestra ubicación para coordinar cualquier acercamiento o propuesta.
 
 Quisquis 1109 y José Mascote
 Guayaquil, Ecuador`
