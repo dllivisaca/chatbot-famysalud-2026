@@ -6,7 +6,14 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const nodemailer = require("nodemailer");
-const { insertarEvento } = require("./db");
+const {
+  insertarEvento,
+  guardarPacienteEnColaAsesor,
+  eliminarPacienteDeColaAsesor,
+  guardarSesionAsesorPersistida,
+  finalizarSesionAsesorPersistida,
+  obtenerEstadoAsesoresPersistido
+} = require("./db");
 
 const app = express();
 
@@ -73,6 +80,7 @@ const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
 const temporizadoresSesionAsesor = new Map();
+const persistenciasAsesorPendientes = new Map();
 const NUMEROS_INTERNOS = [
   ...ASESORES_WHATSAPP.map((asesor) => asesor.phone)
 ];
@@ -656,8 +664,62 @@ function obtenerSesionAsesor(asesorId) {
   return sesionesAsesores.get(asesorId) || null;
 }
 
+function encolarPersistenciaAsesor(key, action, task) {
+  const anterior = persistenciasAsesorPendientes.get(key) || Promise.resolve();
+  const siguiente = anterior
+    .catch(() => {})
+    .then(task)
+    .catch((error) => {
+      console.warn(`[ASESOR_DB] ${action}. Continuando en memoria:`, error.message);
+    })
+    .finally(() => {
+      if (persistenciasAsesorPendientes.get(key) === siguiente) {
+        persistenciasAsesorPendientes.delete(key);
+      }
+    });
+
+  persistenciasAsesorPendientes.set(key, siguiente);
+}
+
+function persistirSesionAsesorSeguro(sesion) {
+  encolarPersistenciaAsesor(
+    `asesor:${sesion.asesorId}`,
+    "No se pudo persistir sesion",
+    () => guardarSesionAsesorPersistida(sesion)
+  );
+}
+
+function persistirColaAsesorSeguro(item) {
+  encolarPersistenciaAsesor(
+    `cola:${item.paciente}`,
+    "No se pudo persistir cola",
+    () => guardarPacienteEnColaAsesor({
+      paciente_phone: item.paciente,
+      origen: item.origen,
+      creado_en: item.creadoEn
+    })
+  );
+}
+
+function eliminarColaAsesorSeguro(paciente) {
+  encolarPersistenciaAsesor(
+    `cola:${paciente}`,
+    "No se pudo eliminar cola",
+    () => eliminarPacienteDeColaAsesor(paciente)
+  );
+}
+
+function finalizarSesionAsesorPersistidaSeguro(asesorId, motivo) {
+  encolarPersistenciaAsesor(
+    `asesor:${asesorId}`,
+    "No se pudo marcar sesion finalizada",
+    () => finalizarSesionAsesorPersistida(asesorId, motivo)
+  );
+}
+
 function guardarSesionAsesor(asesorId, sesion) {
   sesionesAsesores.set(asesorId, sesion);
+  persistirSesionAsesorSeguro(sesion);
   return sesion;
 }
 
@@ -1155,6 +1217,7 @@ function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
     origen,
     creadoEn: Date.now()
   });
+  persistirColaAsesorSeguro(colaEsperaAsesor[colaEsperaAsesor.length - 1]);
 
   return true;
 }
@@ -1277,6 +1340,7 @@ async function finalizarSesionAsesor(asesorId, motivo = "manual") {
     }
   });
 
+  finalizarSesionAsesorPersistidaSeguro(asesorId, motivo);
   resetearSesionAsesor(asesorId);
   await atenderSiguientePacienteEnCola(asesorId);
 }
@@ -1290,6 +1354,7 @@ async function atenderSiguientePacienteEnCola(asesorId) {
   }
 
   const siguiente = colaEsperaAsesor.shift();
+  eliminarColaAsesorSeguro(siguiente.paciente);
   const waitMs = Math.max(Date.now() - (siguiente.creadoEn || Date.now()), 0);
 
   const sesionAsesor = guardarSesionAsesor(
@@ -4785,10 +4850,88 @@ async function enviarWhatsApp(payload) {
   }
 }
 
-app.listen(PORT, () => {
+function fechaPersistidaAMs(value, fallback = Date.now()) {
+  if (!value) {
+    return fallback;
+  }
+
+  const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : fallback;
+}
+
+function construirSesionAsesorDesdePersistencia(row) {
+  const asesor = ASESORES_WHATSAPP.find((item) => item.id === row.asesor_id);
+
+  if (!asesor || !row.paciente_phone) {
+    return null;
+  }
+
+  const asignadoEn = fechaPersistidaAMs(row.asignado_en || row.creado_en);
+
+  return {
+    asesorId: asesor.id,
+    paciente: row.paciente_phone,
+    asesor: row.asesor_phone || asesor.phone,
+    nombreAsesor: row.nombre_asesor || null,
+    cargoAsesor: row.cargo_asesor || null,
+    nombreTemporalAsesor: row.nombre_temporal_asesor || null,
+    origen: row.origen || "paciente",
+    estado: row.estado,
+    asignadoEn,
+    conectadoEn: row.conectado_en ? fechaPersistidaAMs(row.conectado_en) : null,
+    waitMs: 0
+  };
+}
+
+async function restaurarEstadoAsesoresDesdeBD() {
+  try {
+    const estado = await obtenerEstadoAsesoresPersistido();
+
+    colaEsperaAsesor.length = 0;
+    for (const item of estado.cola || []) {
+      if (!item.paciente_phone || pacienteEstaEnColaAsesor(item.paciente_phone)) {
+        continue;
+      }
+
+      colaEsperaAsesor.push({
+        paciente: item.paciente_phone,
+        origen: item.origen || "paciente",
+        creadoEn: fechaPersistidaAMs(item.creado_en)
+      });
+    }
+
+    for (const row of estado.sesiones || []) {
+      const sesion = construirSesionAsesorDesdePersistencia(row);
+
+      if (!sesion) {
+        continue;
+      }
+
+      sesionesAsesores.set(sesion.asesorId, sesion);
+      cancelarExpiracionSesion(sesion.paciente);
+    }
+
+    for (const sesion of sesionesAsesores.values()) {
+      if (sesion.estado === "conectado") {
+        reiniciarTemporizadorSesionAsesor(sesion.asesorId);
+      }
+    }
+
+    console.log("[ASESOR_DB] Estado restaurado:", {
+      enCola: colaEsperaAsesor.length,
+      sesionesActivas: Array.from(sesionesAsesores.values()).filter((sesion) => sesion.estado !== "libre").length
+    });
+  } catch (error) {
+    console.warn("[ASESOR_DB] No se pudo restaurar estado. Iniciando solo en memoria:", error.message);
+  }
+}
+
+restaurarEstadoAsesoresDesdeBD().finally(() => {
+  app.listen(PORT, () => {
   console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`);
   console.log(`[CONFIG] Entorno: ${APP_ENV}`);
   console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
   console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
   inicializarCatalogoServicios();
+  });
 });
