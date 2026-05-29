@@ -12,7 +12,14 @@ const {
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
   finalizarSesionAsesorPersistida,
-  obtenerEstadoAsesoresPersistido
+  obtenerEstadoAsesoresPersistido,
+  obtenerFeriadosPendientesRecordatorio,
+  marcarRecordatorioFeriadoEnviado,
+  obtenerConfirmacionFeriadoPendiente,
+  actualizarConfirmacionHorarioEspecial,
+  marcarEsperandoHorarioParcial,
+  actualizarHorarioParcialFeriado,
+  obtenerHorarioEspecialConfirmadoPorFecha
 } = require("./db");
 
 const app = express();
@@ -77,15 +84,18 @@ const ASESORES_WHATSAPP = [
   { id: "secundario", phone: ASESOR_WHATSAPP_SECUNDARIO }
 ].filter((asesor) => Boolean(asesor.phone));
 const ZONA_HORARIA_ASESOR = "America/Guayaquil";
-const MENSAJE_ASESOR_FUERA_HORARIO = `🕒 En este momento no estamos en horario de atención con asesores.
+const MENSAJE_ASESOR_FUERA_HORARIO = `🕒 En este momento no estamos en horario de atención con asesores por WhatsApp.
 
 Puedes seguir usando el menú automático para consultar información disponible por aquí.
 
-Nuestro horario de atención con asesores es:
+Los horarios de asesores por WhatsApp pueden ser distintos a la atención presencial o a los servicios médicos del centro.
+
+Nuestro horario de atención con asesores por WhatsApp es:
 Lun-Vie: 7:30 AM - 5:30 PM
 Sáb: 8:00 AM - 12:30 PM
 
 Te esperamos en el siguiente horario laboral 💙`;
+const INTERVALO_REVISION_FERIADOS_MS = 60 * 1000;
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
@@ -107,6 +117,9 @@ const sesionesAsesores = new Map(ASESORES_WHATSAPP.map((asesor) => [
 let catalogoServiciosCache = null;
 let catalogoServiciosCacheTimestamp = 0;
 let catalogoServiciosRefreshInterval = null;
+let feriadosRevisionInterval = null;
+let feriadosRevisionEnCurso = false;
+let ultimaRevisionRecordatorioFeriados = null;
 
 function flagActiva(value) {
   return String(value || "").trim().toLowerCase() === "true";
@@ -538,6 +551,10 @@ app.post("/webhook", async (req, res) => {
 
     marcarMensajeProcesado(messageId, now);
 
+    if (await manejarRespuestaFeriadoAsesorPrincipal(from, rawText)) {
+      return res.sendStatus(200);
+    }
+
     if (await manejarMensajeAsesor(from, rawText, message)) {
       return res.sendStatus(200);
     }
@@ -781,6 +798,9 @@ function obtenerEstadoAsesores() {
 function obtenerFechaHoraEcuador(fecha = new Date()) {
   const partes = new Intl.DateTimeFormat("en-US", {
     timeZone: ZONA_HORARIA_ASESOR,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
@@ -789,12 +809,26 @@ function obtenerFechaHoraEcuador(fecha = new Date()) {
 
   return {
     dia: partes.find((parte) => parte.type === "weekday")?.value,
+    anio: partes.find((parte) => parte.type === "year")?.value,
+    mes: partes.find((parte) => parte.type === "month")?.value,
+    diaMes: partes.find((parte) => parte.type === "day")?.value,
     hora: Number.parseInt(partes.find((parte) => parte.type === "hour")?.value || "0", 10),
     minuto: Number.parseInt(partes.find((parte) => parte.type === "minute")?.value || "0", 10)
   };
 }
 
-function estaEnHorarioLaboralAsesor(fecha = new Date()) {
+function obtenerFechaISOEcuador(fecha = new Date()) {
+  const { anio, mes, diaMes } = obtenerFechaHoraEcuador(fecha);
+  return `${anio}-${mes}-${diaMes}`;
+}
+
+function sumarDiasFechaISO(fechaISO, dias) {
+  const fecha = new Date(`${fechaISO}T00:00:00Z`);
+  fecha.setUTCDate(fecha.getUTCDate() + dias);
+  return fecha.toISOString().slice(0, 10);
+}
+
+function estaEnHorarioNormalAsesor(fecha = new Date()) {
   const { dia, hora, minuto } = obtenerFechaHoraEcuador(fecha);
   const minutosDia = hora * 60 + minuto;
 
@@ -807,6 +841,230 @@ function estaEnHorarioLaboralAsesor(fecha = new Date()) {
   }
 
   return false;
+}
+
+function convertirHoraAMinutos(hora) {
+  if (!hora) {
+    return null;
+  }
+
+  const texto = String(hora).slice(0, 5);
+  const match = texto.match(/^(\d{2}):(\d{2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return Number.parseInt(match[1], 10) * 60 + Number.parseInt(match[2], 10);
+}
+
+async function obtenerHorarioEspecialConfirmadoSeguro(fechaISO) {
+  try {
+    return await obtenerHorarioEspecialConfirmadoPorFecha(fechaISO);
+  } catch (error) {
+    console.warn("[FERIADOS] Error consultando BD:", error.message);
+    return null;
+  }
+}
+
+async function estaEnHorarioLaboralAsesor(fecha = new Date()) {
+  const fechaISO = obtenerFechaISOEcuador(fecha);
+  const horarioEspecial = await obtenerHorarioEspecialConfirmadoSeguro(fechaISO);
+
+  if (horarioEspecial?.tipo === "cerrado") {
+    return false;
+  }
+
+  if (horarioEspecial?.tipo === "parcial") {
+    const { hora, minuto } = obtenerFechaHoraEcuador(fecha);
+    const minutosDia = hora * 60 + minuto;
+    const inicio = convertirHoraAMinutos(horarioEspecial.hora_inicio);
+    const fin = convertirHoraAMinutos(horarioEspecial.hora_fin);
+    return inicio !== null && fin !== null && minutosDia >= inicio && minutosDia <= fin;
+  }
+
+  return estaEnHorarioNormalAsesor(fecha);
+}
+
+function formatearFechaFeriado(fecha) {
+  const fechaISO = obtenerFechaISODesdeValorBD(fecha);
+  const [anio, mes, dia] = fechaISO.split("-").map((valor) => Number.parseInt(valor, 10));
+  const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
+  return new Intl.DateTimeFormat("es-EC", {
+    timeZone: ZONA_HORARIA_ASESOR,
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  }).format(fechaUTC);
+}
+
+function obtenerFechaISODesdeValorBD(fecha) {
+  if (typeof fecha === "string") {
+    return fecha.slice(0, 10);
+  }
+
+  return new Date(fecha).toISOString().slice(0, 10);
+}
+
+function formatearFechaNombreFeriado(feriado) {
+  return `${obtenerFechaISODesdeValorBD(feriado.fecha)} / ${feriado.nombre}`;
+}
+
+function construirMensajeRecordatorioFeriado(feriado) {
+  return `🗓️ Se acerca un feriado: ${formatearFechaFeriado(feriado.fecha)}.
+
+Feriado: ${feriado.nombre}
+
+¿Qué horario tendrá la atención por WhatsApp con asesores ese día?
+
+1. Horario normal de asesores
+2. Horario parcial de asesores
+3. Sin atención con asesores
+
+Nota: esta configuración solo aplica al canal de WhatsApp, no confirma la operación presencial del centro médico ni de todos sus servicios.
+
+Responde con el número de la opción.`;
+}
+
+function validarRespuestaHorarioParcial(texto) {
+  const match = String(texto || "").trim().match(/^parcial\s+([01]\d|2[0-3]):([0-5]\d)\s+([01]\d|2[0-3]):([0-5]\d)$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  const inicio = `${match[1]}:${match[2]}`;
+  const fin = `${match[3]}:${match[4]}`;
+
+  if (convertirHoraAMinutos(inicio) >= convertirHoraAMinutos(fin)) {
+    return null;
+  }
+
+  return {
+    horaInicio: `${inicio}:00`,
+    horaFin: `${fin}:00`,
+    inicio,
+    fin
+  };
+}
+
+function esAsesorPrincipal(phone) {
+  return phone === ASESOR_WHATSAPP_PRINCIPAL;
+}
+
+async function obtenerConfirmacionFeriadoPendienteSeguro() {
+  try {
+    return await obtenerConfirmacionFeriadoPendiente();
+  } catch (error) {
+    console.warn("[FERIADOS] Error consultando BD:", error.message);
+    return null;
+  }
+}
+
+async function manejarRespuestaFeriadoAsesorPrincipal(from, rawText) {
+  if (!esAsesorPrincipal(from)) {
+    return false;
+  }
+
+  const sesionAsesor = obtenerSesionAsesorPorTelefono(from);
+
+  if (sesionAsesor?.estado !== "libre") {
+    return false;
+  }
+
+  const confirmacion = await obtenerConfirmacionFeriadoPendienteSeguro();
+
+  if (!confirmacion) {
+    return false;
+  }
+
+  const texto = String(rawText || "").trim();
+
+  if (confirmacion.estado_confirmacion === "esperando_horario_parcial") {
+    const horario = validarRespuestaHorarioParcial(texto);
+
+    if (!horario) {
+      await enviarMensajeTexto(
+        from,
+        "Por favor indica el horario parcial con este formato exacto:\nparcial 08:00 12:30"
+      );
+      return true;
+    }
+
+    try {
+      await actualizarHorarioParcialFeriado(
+        confirmacion.feriado_id,
+        horario.horaInicio,
+        horario.horaFin,
+        from
+      );
+      console.log("[FERIADOS] Horario parcial guardado", {
+        feriadoId: confirmacion.feriado_id,
+        horaInicio: horario.horaInicio,
+        horaFin: horario.horaFin
+      });
+    } catch (error) {
+      console.warn("[FERIADOS] Error consultando BD:", error.message);
+      return false;
+    }
+
+    await enviarMensajeTexto(
+      from,
+      `✅ Listo. Para el feriado ${formatearFechaNombreFeriado(confirmacion)}, habrá atención parcial con asesores por WhatsApp de ${horario.inicio} a ${horario.fin}.`
+    );
+    return true;
+  }
+
+  if (texto === "1") {
+    try {
+      await actualizarConfirmacionHorarioEspecial(confirmacion.feriado_id, "normal", from);
+      console.log("[FERIADOS] Confirmación guardada", { feriadoId: confirmacion.feriado_id, tipo: "normal" });
+    } catch (error) {
+      console.warn("[FERIADOS] Error consultando BD:", error.message);
+      return false;
+    }
+
+    await enviarMensajeTexto(
+      from,
+      `✅ Listo. Para el feriado ${formatearFechaNombreFeriado(confirmacion)}, se usará el horario normal de asesores por WhatsApp.`
+    );
+    return true;
+  }
+
+  if (texto === "2") {
+    try {
+      await marcarEsperandoHorarioParcial(confirmacion.feriado_id);
+      console.log("[FERIADOS] Confirmación guardada", { feriadoId: confirmacion.feriado_id, tipo: "parcial_pendiente" });
+    } catch (error) {
+      console.warn("[FERIADOS] Error consultando BD:", error.message);
+      return false;
+    }
+
+    await enviarMensajeTexto(
+      from,
+      "Perfecto. Indica el horario parcial con este formato:\nparcial 08:00 12:30\n\nEjemplo:\nparcial 08:00 12:30"
+    );
+    return true;
+  }
+
+  if (texto === "3") {
+    try {
+      await actualizarConfirmacionHorarioEspecial(confirmacion.feriado_id, "cerrado", from);
+      console.log("[FERIADOS] Confirmación guardada", { feriadoId: confirmacion.feriado_id, tipo: "cerrado" });
+    } catch (error) {
+      console.warn("[FERIADOS] Error consultando BD:", error.message);
+      return false;
+    }
+
+    await enviarMensajeTexto(
+      from,
+      `✅ Listo. Para el feriado ${formatearFechaNombreFeriado(confirmacion)}, no habrá atención con asesores por WhatsApp.`
+    );
+    return true;
+  }
+
+  await enviarMensajeTexto(from, "Por favor responde con 1, 2 o 3.");
+  return true;
 }
 
 async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paciente") {
@@ -830,7 +1088,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     return;
   }
 
-  if (!estaEnHorarioLaboralAsesor()) {
+  if (!(await estaEnHorarioLaboralAsesor())) {
     console.log("[ASESOR_HORARIO] Solicitud fuera de horario laboral:", {
       paciente,
       origen
@@ -4976,6 +5234,64 @@ async function restaurarEstadoAsesoresDesdeBD() {
   }
 }
 
+async function revisarRecordatoriosFeriados(fecha = new Date()) {
+  const { hora, minuto } = obtenerFechaHoraEcuador(fecha);
+
+  if (hora !== 20 || minuto !== 0) {
+    return;
+  }
+
+  const fechaHoy = obtenerFechaISOEcuador(fecha);
+  const revisionKey = `${fechaHoy}-${hora}:${minuto}`;
+
+  if (ultimaRevisionRecordatorioFeriados === revisionKey || feriadosRevisionEnCurso) {
+    return;
+  }
+
+  ultimaRevisionRecordatorioFeriados = revisionKey;
+  feriadosRevisionEnCurso = true;
+
+  try {
+    const fechaFeriado = sumarDiasFechaISO(fechaHoy, 2);
+    const feriados = await obtenerFeriadosPendientesRecordatorio(fechaFeriado);
+
+    if (!feriados.length) {
+      console.log("[FERIADOS] Sin recordatorios pendientes", { fechaFeriado });
+      return;
+    }
+
+    for (const feriado of feriados) {
+      await enviarMensajeTexto(ASESOR_WHATSAPP_PRINCIPAL, construirMensajeRecordatorioFeriado(feriado));
+      await marcarRecordatorioFeriadoEnviado(feriado.feriado_id);
+      console.log("[FERIADOS] Recordatorio enviado", {
+        feriadoId: feriado.feriado_id,
+        fecha: obtenerFechaISODesdeValorBD(feriado.fecha),
+        nombre: feriado.nombre
+      });
+    }
+  } catch (error) {
+    console.warn("[FERIADOS] Error consultando BD:", error.message);
+  } finally {
+    feriadosRevisionEnCurso = false;
+  }
+}
+
+function programarRevisionFeriados() {
+  if (feriadosRevisionInterval) {
+    clearInterval(feriadosRevisionInterval);
+  }
+
+  feriadosRevisionInterval = setInterval(() => {
+    revisarRecordatoriosFeriados().catch((error) => {
+      console.warn("[FERIADOS] Error consultando BD:", error.message);
+    });
+  }, INTERVALO_REVISION_FERIADOS_MS);
+
+  revisarRecordatoriosFeriados().catch((error) => {
+    console.warn("[FERIADOS] Error consultando BD:", error.message);
+  });
+}
+
 restaurarEstadoAsesoresDesdeBD().finally(() => {
   app.listen(PORT, () => {
   console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`);
@@ -4983,5 +5299,6 @@ restaurarEstadoAsesoresDesdeBD().finally(() => {
   console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
   console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
   inicializarCatalogoServicios();
+  programarRevisionFeriados();
   });
 });

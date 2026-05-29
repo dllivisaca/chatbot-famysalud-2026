@@ -156,6 +156,186 @@ async function ejecutarAsesorQuery(sql, params = [], action = "asesor_query") {
   }
 }
 
+async function ejecutarFeriadosQuery(sql, params = [], action = "feriados_query") {
+  if (!dbConfigurada()) {
+    return null;
+  }
+
+  const startedAt = Date.now();
+  let timeoutId;
+
+  try {
+    const result = await Promise.race([
+      pool.execute(sql, params),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
+        }, DB_QUERY_TIMEOUT_MS);
+      })
+    ]);
+
+    console.log("[FERIADOS] Query OK:", {
+      action,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return result;
+  } catch (error) {
+    console.warn("[FERIADOS] Error consultando BD:", {
+      action,
+      elapsedMs: Date.now() - startedAt,
+      error: error.message
+    });
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function obtenerFeriadosPendientesRecordatorio(fechaFeriado) {
+  if (!dbConfigurada()) {
+    return [];
+  }
+
+  const [rows] = await ejecutarFeriadosQuery(
+    `SELECT f.id AS feriado_id, f.fecha, f.nombre, h.estado_confirmacion, h.recordatorio_enviado
+     FROM chatbot_feriados f
+     LEFT JOIN chatbot_horarios_especiales h ON h.feriado_id = f.id
+     WHERE f.activo = 1
+       AND f.fecha = ?
+       AND (h.feriado_id IS NULL OR COALESCE(h.recordatorio_enviado, 0) = 0)
+       AND (h.estado_confirmacion IS NULL OR h.estado_confirmacion = 'pendiente')`,
+    [fechaFeriado],
+    "holiday_pending_reminders"
+  );
+
+  return rows || [];
+}
+
+async function marcarRecordatorioFeriadoEnviado(feriadoId) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  const [update] = await ejecutarFeriadosQuery(
+    `UPDATE chatbot_horarios_especiales
+     SET recordatorio_enviado = 1,
+         recordatorio_enviado_en = NOW(),
+         estado_confirmacion = COALESCE(estado_confirmacion, 'pendiente')
+     WHERE feriado_id = ?`,
+    [feriadoId],
+    "holiday_mark_reminder_sent"
+  );
+
+  if (update.affectedRows > 0) {
+    return;
+  }
+
+  await ejecutarFeriadosQuery(
+    `INSERT INTO chatbot_horarios_especiales
+      (feriado_id, tipo, recordatorio_enviado, recordatorio_enviado_en, estado_confirmacion)
+     VALUES (?, 'normal', 1, NOW(), 'pendiente')`,
+    [feriadoId],
+    "holiday_insert_reminder_sent"
+  );
+}
+
+async function obtenerConfirmacionFeriadoPendiente() {
+  if (!dbConfigurada()) {
+    return null;
+  }
+
+  const [rows] = await ejecutarFeriadosQuery(
+    `SELECT f.id AS feriado_id, f.fecha, f.nombre, h.estado_confirmacion
+     FROM chatbot_horarios_especiales h
+     INNER JOIN chatbot_feriados f ON f.id = h.feriado_id
+     WHERE f.activo = 1
+       AND h.recordatorio_enviado = 1
+       AND h.estado_confirmacion IN ('pendiente', 'esperando_horario_parcial')
+     ORDER BY f.fecha ASC
+     LIMIT 1`,
+    [],
+    "holiday_pending_confirmation"
+  );
+
+  return rows?.[0] || null;
+}
+
+async function actualizarConfirmacionHorarioEspecial(feriadoId, tipo, confirmadoPor) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  await ejecutarFeriadosQuery(
+    `UPDATE chatbot_horarios_especiales
+     SET tipo = ?,
+         hora_inicio = NULL,
+         hora_fin = NULL,
+         confirmado_por = ?,
+         confirmado_en = NOW(),
+         estado_confirmacion = 'confirmado'
+     WHERE feriado_id = ?`,
+    [tipo, confirmadoPor, feriadoId],
+    `holiday_confirm_${tipo}`
+  );
+}
+
+async function marcarEsperandoHorarioParcial(feriadoId) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  await ejecutarFeriadosQuery(
+    `UPDATE chatbot_horarios_especiales
+     SET tipo = 'parcial',
+         estado_confirmacion = 'esperando_horario_parcial'
+     WHERE feriado_id = ?`,
+    [feriadoId],
+    "holiday_wait_partial"
+  );
+}
+
+async function actualizarHorarioParcialFeriado(feriadoId, horaInicio, horaFin, confirmadoPor) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  await ejecutarFeriadosQuery(
+    `UPDATE chatbot_horarios_especiales
+     SET tipo = 'parcial',
+         hora_inicio = ?,
+         hora_fin = ?,
+         confirmado_por = ?,
+         confirmado_en = NOW(),
+         estado_confirmacion = 'confirmado'
+     WHERE feriado_id = ?`,
+    [horaInicio, horaFin, confirmadoPor, feriadoId],
+    "holiday_confirm_partial"
+  );
+}
+
+async function obtenerHorarioEspecialConfirmadoPorFecha(fecha) {
+  if (!dbConfigurada()) {
+    return null;
+  }
+
+  const [rows] = await ejecutarFeriadosQuery(
+    `SELECT f.fecha, f.nombre, h.tipo, h.hora_inicio, h.hora_fin
+     FROM chatbot_horarios_especiales h
+     INNER JOIN chatbot_feriados f ON f.id = h.feriado_id
+     WHERE f.activo = 1
+       AND f.fecha = ?
+       AND h.estado_confirmacion = 'confirmado'
+     LIMIT 1`,
+    [fecha],
+    "holiday_confirmed_by_date"
+  );
+
+  return rows?.[0] || null;
+}
+
 async function guardarPacienteEnColaAsesor(item) {
   if (!dbConfigurada()) {
     return;
@@ -276,5 +456,12 @@ module.exports = {
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
   finalizarSesionAsesorPersistida,
-  obtenerEstadoAsesoresPersistido
+  obtenerEstadoAsesoresPersistido,
+  obtenerFeriadosPendientesRecordatorio,
+  marcarRecordatorioFeriadoEnviado,
+  obtenerConfirmacionFeriadoPendiente,
+  actualizarConfirmacionHorarioEspecial,
+  marcarEsperandoHorarioParcial,
+  actualizarHorarioParcialFeriado,
+  obtenerHorarioEspecialConfirmadoPorFecha
 };
