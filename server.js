@@ -97,9 +97,11 @@ Sáb: 8:00 AM - 12:30 PM
 Te esperamos en el siguiente horario laboral 💙`;
 const INTERVALO_REVISION_FERIADOS_MS = 60 * 1000;
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
+const TIEMPO_ACEPTACION_ASESOR_MS = 3 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
 const temporizadoresSesionAsesor = new Map();
+const temporizadoresAceptacionAsesor = new Map();
 const persistenciasAsesorPendientes = new Map();
 const NUMEROS_INTERNOS = [
   ...ASESORES_WHATSAPP.map((asesor) => asesor.phone)
@@ -747,6 +749,7 @@ function finalizarSesionAsesorPersistidaSeguro(asesorId, motivo) {
 function guardarSesionAsesor(asesorId, sesion) {
   sesionesAsesores.set(asesorId, sesion);
   persistirSesionAsesorSeguro(sesion);
+  reiniciarTemporizadorAceptacionAsesor(asesorId);
   return sesion;
 }
 
@@ -757,6 +760,13 @@ function obtenerSesionAsesorPorTelefono(phone) {
 
 function obtenerAsesorLibre() {
   return ASESORES_WHATSAPP.find((asesor) => obtenerSesionAsesor(asesor.id)?.estado === "libre") || null;
+}
+
+function obtenerAsesorLibreExcluyendo(asesorIdExcluido) {
+  return ASESORES_WHATSAPP.find((asesor) => (
+    asesor.id !== asesorIdExcluido &&
+    obtenerSesionAsesor(asesor.id)?.estado === "libre"
+  )) || null;
 }
 
 function obtenerSesionAsesorPorPaciente(paciente) {
@@ -1219,6 +1229,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
 
     if (!asesorConCargo) {
       console.log("[ASESOR] Falta cargo para conectar:", { recibido: mensaje });
+      reiniciarTemporizadorAceptacionAsesor(sesionAsesor.asesorId);
       await enviarMensajeTexto(
         sesionAsesor.asesor,
         "Por favor incluye el cargo para continuar.\nEjemplo:\nCarlos asesor\nMaría asesora"
@@ -1254,6 +1265,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
           asesor: from,
           paciente: sesionAsesor.paciente
         });
+        reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
       } catch (error) {
         console.error("[ASESOR] Error reenviando mensaje al paciente:", error.response?.data || error.message);
       }
@@ -1272,6 +1284,7 @@ async function manejarMensajeAsesor(from, rawText, message) {
           paciente: sesionAsesor.paciente,
           tipo: message.type
         });
+        reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
       }
       console.log("[ASESOR] Despues await reenviarMensajeMultimediaSeguro asesor->paciente:", {
         asesor: from,
@@ -1530,6 +1543,56 @@ function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
   return true;
 }
 
+function agregarPacienteAlInicioColaAsesor(paciente, origen = "paciente") {
+  if (pacienteEstaEnColaAsesor(paciente)) {
+    return false;
+  }
+
+  cancelarExpiracionSesion(paciente);
+  const item = {
+    paciente,
+    origen,
+    creadoEn: Date.now()
+  };
+  colaEsperaAsesor.unshift(item);
+  persistirColaAsesorSeguro(item);
+
+  return true;
+}
+
+function esSesionEsperandoAceptacionAsesor(sesionAsesor) {
+  return sesionAsesor?.paciente && (
+    sesionAsesor.estado === "esperando_nombre" ||
+    sesionAsesor.estado === "esperando_nombre_cargo"
+  );
+}
+
+function reiniciarTemporizadorAceptacionAsesor(asesorId) {
+  const temporizadorActual = temporizadoresAceptacionAsesor.get(asesorId);
+  const sesionAsesor = obtenerSesionAsesor(asesorId);
+
+  if (temporizadorActual) {
+    clearTimeout(temporizadorActual);
+  }
+
+  if (!esSesionEsperandoAceptacionAsesor(sesionAsesor)) {
+    temporizadoresAceptacionAsesor.delete(asesorId);
+    return;
+  }
+
+  const temporizador = setTimeout(async () => {
+    await expirarAceptacionAsesorPorInactividad(asesorId);
+  }, TIEMPO_ACEPTACION_ASESOR_MS);
+  temporizadoresAceptacionAsesor.set(asesorId, temporizador);
+
+  console.log("[ASESOR_TIMEOUT] Temporizador de aceptacion reiniciado:", {
+    asesorId,
+    paciente: sesionAsesor.paciente,
+    estado: sesionAsesor.estado,
+    tiempoMs: TIEMPO_ACEPTACION_ASESOR_MS
+  });
+}
+
 function reiniciarTemporizadorSesionAsesor(asesorId) {
   const temporizadorActual = temporizadoresSesionAsesor.get(asesorId);
   const sesionAsesor = obtenerSesionAsesor(asesorId);
@@ -1568,6 +1631,70 @@ async function expirarSesionAsesorPorInactividad(asesorId) {
   });
 
   await finalizarSesionAsesor(asesorId, "inactividad");
+}
+
+async function expirarAceptacionAsesorPorInactividad(asesorId) {
+  const sesionAsesor = obtenerSesionAsesor(asesorId);
+
+  if (!esSesionEsperandoAceptacionAsesor(sesionAsesor)) {
+    return;
+  }
+
+  temporizadoresAceptacionAsesor.delete(asesorId);
+  const paciente = sesionAsesor.paciente;
+  const asesor = sesionAsesor.asesor;
+  const origen = sesionAsesor.origen || "paciente";
+
+  console.log("[ASESOR_TIMEOUT] Aceptacion expirada por falta de respuesta:", {
+    asesorId,
+    paciente,
+    asesor,
+    estado: sesionAsesor.estado
+  });
+
+  try {
+    await enviarMensajeTexto(
+      paciente,
+      "⏳ Seguimos buscando un asesor disponible para continuar contigo. Gracias por tu paciencia 💙"
+    );
+    await enviarMensajeTexto(
+      asesor,
+      "⏱️ La solicitud fue reasignada por falta de respuesta."
+    );
+  } catch (error) {
+    console.warn("[ASESOR_TIMEOUT] Error notificando reasignacion:", error.response?.data || error.message);
+  }
+
+  finalizarSesionAsesorPersistidaSeguro(asesorId, "aceptacion_expirada");
+  resetearSesionAsesor(asesorId);
+
+  const asesorLibre = obtenerAsesorLibreExcluyendo(asesorId);
+
+  if (asesorLibre) {
+    const nuevaSesion = guardarSesionAsesor(
+      asesorLibre.id,
+      construirSesionAsesorAsignada(asesorLibre, paciente, origen)
+    );
+    cancelarExpiracionSesion(paciente);
+    console.log("[ASESOR_TIMEOUT] Solicitud reasignada a otro asesor:", {
+      paciente,
+      asesorAnteriorId: asesorId,
+      asesorNuevoId: asesorLibre.id
+    });
+    await enviarMensajeTexto(
+      nuevaSesion.asesor,
+      "📩 Nueva solicitud de atención reasignada.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+    );
+    return;
+  }
+
+  if (agregarPacienteAlInicioColaAsesor(paciente, origen)) {
+    console.log("[ASESOR_TIMEOUT] Paciente devuelto a cola por falta de asesor alterno:", {
+      paciente,
+      origen,
+      totalEnCola: colaEsperaAsesor.length
+    });
+  }
 }
 
 async function finalizarSesionAsesor(asesorId, motivo = "manual") {
@@ -1774,10 +1901,16 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
 
 function resetearSesionAsesor(asesorId) {
   const temporizadorActual = temporizadoresSesionAsesor.get(asesorId);
+  const temporizadorAceptacionActual = temporizadoresAceptacionAsesor.get(asesorId);
 
   if (temporizadorActual) {
     clearTimeout(temporizadorActual);
     temporizadoresSesionAsesor.delete(asesorId);
+  }
+
+  if (temporizadorAceptacionActual) {
+    clearTimeout(temporizadorAceptacionActual);
+    temporizadoresAceptacionAsesor.delete(asesorId);
   }
 
   const asesor = ASESORES_WHATSAPP.find((item) => item.id === asesorId);
@@ -5222,6 +5355,8 @@ async function restaurarEstadoAsesoresDesdeBD() {
     for (const sesion of sesionesAsesores.values()) {
       if (sesion.estado === "conectado") {
         reiniciarTemporizadorSesionAsesor(sesion.asesorId);
+      } else if (esSesionEsperandoAceptacionAsesor(sesion)) {
+        reiniciarTemporizadorAceptacionAsesor(sesion.asesorId);
       }
     }
 
