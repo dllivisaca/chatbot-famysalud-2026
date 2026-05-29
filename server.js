@@ -76,6 +76,16 @@ const ASESORES_WHATSAPP = [
   { id: "principal", phone: ASESOR_WHATSAPP_PRINCIPAL },
   { id: "secundario", phone: ASESOR_WHATSAPP_SECUNDARIO }
 ].filter((asesor) => Boolean(asesor.phone));
+const ZONA_HORARIA_ASESOR = "America/Guayaquil";
+const MENSAJE_ASESOR_FUERA_HORARIO = `🕒 En este momento no estamos en horario de atención con asesores.
+
+Puedes seguir usando el menú automático para consultar información disponible por aquí.
+
+Nuestro horario de atención con asesores es:
+Lun-Vie: 7:30 AM - 5:30 PM
+Sáb: 8:00 AM - 12:30 PM
+
+Te esperamos en el siguiente horario laboral 💙`;
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
@@ -768,6 +778,37 @@ function obtenerEstadoAsesores() {
   }));
 }
 
+function obtenerFechaHoraEcuador(fecha = new Date()) {
+  const partes = new Intl.DateTimeFormat("en-US", {
+    timeZone: ZONA_HORARIA_ASESOR,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(fecha);
+
+  return {
+    dia: partes.find((parte) => parte.type === "weekday")?.value,
+    hora: Number.parseInt(partes.find((parte) => parte.type === "hour")?.value || "0", 10),
+    minuto: Number.parseInt(partes.find((parte) => parte.type === "minute")?.value || "0", 10)
+  };
+}
+
+function estaEnHorarioLaboralAsesor(fecha = new Date()) {
+  const { dia, hora, minuto } = obtenerFechaHoraEcuador(fecha);
+  const minutosDia = hora * 60 + minuto;
+
+  if (["Mon", "Tue", "Wed", "Thu", "Fri"].includes(dia)) {
+    return minutosDia >= 7 * 60 + 30 && minutosDia <= 17 * 60 + 30;
+  }
+
+  if (dia === "Sat") {
+    return minutosDia >= 8 * 60 && minutosDia <= 12 * 60 + 30;
+  }
+
+  return false;
+}
+
 async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paciente") {
   const esEmpresa = origen === "empresa";
   const esProveedor = origen === "proveedor";
@@ -786,6 +827,15 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       paciente,
       "💬 Ya estás esperando para hablar con un asesor.\n\nTe avisaremos cuando se conecte contigo 😊"
     );
+    return;
+  }
+
+  if (!estaEnHorarioLaboralAsesor()) {
+    console.log("[ASESOR_HORARIO] Solicitud fuera de horario laboral:", {
+      paciente,
+      origen
+    });
+    await enviarMensajeTexto(paciente, MENSAJE_ASESOR_FUERA_HORARIO);
     return;
   }
 
