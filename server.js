@@ -1,5 +1,8 @@
 require("dotenv").config();
 
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Guayaquil";
+process.env.TZ = process.env.TZ || APP_TIMEZONE;
+
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
@@ -31,6 +34,8 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
+const CHATBOT_CATALOG_BASE_URL = process.env.CHATBOT_CATALOG_BASE_URL;
+const CHATBOT_CATALOG_PATH = process.env.CHATBOT_CATALOG_PATH;
 const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
@@ -84,7 +89,7 @@ const ASESORES_WHATSAPP = [
   { id: "principal", phone: ASESOR_WHATSAPP_PRINCIPAL },
   { id: "secundario", phone: ASESOR_WHATSAPP_SECUNDARIO }
 ].filter((asesor) => Boolean(asesor.phone));
-const ZONA_HORARIA_ASESOR = "America/Guayaquil";
+const ZONA_HORARIA_ASESOR = APP_TIMEZONE;
 const MENSAJE_ASESOR_FUERA_HORARIO = `🕒 En este momento no estamos en horario de atención con asesores por WhatsApp.
 
 Puedes seguir usando el menú automático para consultar información disponible por aquí.
@@ -4199,14 +4204,59 @@ async function guardarCatalogoServiciosPersistente(catalogo) {
   }
 }
 
-async function refrescarCatalogoServiciosDesdeApi() {
-  if (!CHATBOT_CATALOG_URL) {
-    throw new Error("CHATBOT_CATALOG_URL no esta configurada.");
+function unirUrlBaseYPath(baseUrl, ruta) {
+  const base = String(baseUrl || "").trim();
+  const pathCatalogo = String(ruta || "").trim();
+
+  if (!base || !pathCatalogo) {
+    return "";
   }
 
-  console.log("[CATALOGO] Consultando API.");
+  return `${base.replace(/\/+$/, "")}/${pathCatalogo.replace(/^\/+/, "")}`;
+}
 
-  const response = await axios.get(CHATBOT_CATALOG_URL, {
+function obtenerCatalogoServiciosUrl() {
+  const urlCompleta = String(CHATBOT_CATALOG_URL || "").trim();
+
+  if (urlCompleta) {
+    return urlCompleta;
+  }
+
+  return unirUrlBaseYPath(CHATBOT_CATALOG_BASE_URL, CHATBOT_CATALOG_PATH);
+}
+
+function sanearUrlParaLog(url) {
+  try {
+    const parsedUrl = new URL(url);
+
+    parsedUrl.username = parsedUrl.username ? "[redacted]" : "";
+    parsedUrl.password = parsedUrl.password ? "[redacted]" : "";
+
+    for (const key of parsedUrl.searchParams.keys()) {
+      if (/token|key|secret|password|pass|auth|credential/i.test(key)) {
+        parsedUrl.searchParams.set(key, "[redacted]");
+      }
+    }
+
+    return parsedUrl.toString();
+  } catch (error) {
+    return String(url || "").replace(/([?&][^=]*(?:token|key|secret|password|pass|auth|credential)[^=]*=)[^&]*/gi, "$1[redacted]");
+  }
+}
+
+async function refrescarCatalogoServiciosDesdeApi() {
+  const catalogoUrl = obtenerCatalogoServiciosUrl();
+  const catalogoUrlLog = sanearUrlParaLog(catalogoUrl);
+
+  if (!catalogoUrl) {
+    throw new Error("Configura CHATBOT_CATALOG_URL o CHATBOT_CATALOG_BASE_URL + CHATBOT_CATALOG_PATH.");
+  }
+
+  console.log("[CATALOGO] Consultando API.", {
+    catalogUrl: catalogoUrlLog
+  });
+
+  const response = await axios.get(catalogoUrl, {
     timeout: 10000
   });
 
@@ -4219,6 +4269,7 @@ async function refrescarCatalogoServiciosDesdeApi() {
   await guardarCatalogoServiciosPersistente(response.data);
 
   console.log("[CATALOGO] Catalogo recibido:", {
+    catalogUrl: catalogoUrlLog,
     status: response.status,
     areas: response.data.areas.length,
     updated_at: response.data?.updated_at
@@ -4243,7 +4294,8 @@ async function consultarCatalogoServicios() {
     if (catalogoServiciosCache) {
       console.warn("[CATALOGO] Usando cache anterior por error", {
         message: error.message,
-        status: error.response?.status
+        status: error.response?.status,
+        catalogUrl: sanearUrlParaLog(obtenerCatalogoServiciosUrl())
       });
       return catalogoServiciosCache;
     }
@@ -4256,7 +4308,8 @@ async function consultarCatalogoServicios() {
 
     console.error("[CATALOGO] Error sin cache disponible", {
       message: error.message,
-      status: error.response?.status
+      status: error.response?.status,
+      catalogUrl: sanearUrlParaLog(obtenerCatalogoServiciosUrl())
     });
     throw error;
   }
@@ -4269,7 +4322,8 @@ async function refrescarCatalogoServiciosEnSegundoPlano() {
   } catch (error) {
     console.warn("[CATALOGO] Refresh automatico fallido. Se mantiene cache previa.", {
       message: error.message,
-      status: error.response?.status
+      status: error.response?.status,
+      catalogUrl: sanearUrlParaLog(obtenerCatalogoServiciosUrl())
     });
   }
 }

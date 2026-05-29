@@ -6,6 +6,8 @@ const DB_QUERY_TIMEOUT_MS = Number.isInteger(DB_QUERY_TIMEOUT_MS_CONFIG) && DB_Q
   ? DB_QUERY_TIMEOUT_MS_CONFIG
   : 10000;
 const DB_PORT_EFFECTIVE = Number.isInteger(DB_PORT) ? DB_PORT : 3306;
+const DB_TIMEZONE = "-05:00";
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Guayaquil";
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
@@ -13,6 +15,7 @@ const pool = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  timezone: DB_TIMEZONE,
   waitForConnections: true,
   connectionLimit: 5,
   queueLimit: 0
@@ -22,7 +25,9 @@ console.log("[DB] Configuracion MySQL:", {
   DB_HOST: process.env.DB_HOST || null,
   DB_PORT: DB_PORT_EFFECTIVE,
   DB_NAME: process.env.DB_NAME || null,
-  DB_USER: process.env.DB_USER || null
+  DB_USER: process.env.DB_USER || null,
+  DB_TIMEZONE,
+  APP_TIMEZONE
 });
 
 let soportaSessionId = true;
@@ -63,12 +68,13 @@ async function insertarEvento(evento) {
 
 async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
   const payload = evento.payload ? JSON.stringify(evento.payload) : null;
+  const createdAt = obtenerFechaHoraMysqlEcuador();
 
   if (!incluirSessionId) {
     await ejecutarQueryConTimeout(
       `INSERT INTO chatbot_eventos
-        (event_type, user_hash, message_id, button_id, menu_key, flow_key, payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (event_type, user_hash, message_id, button_id, menu_key, flow_key, payload, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         evento.event_type,
         evento.user_hash,
@@ -76,16 +82,18 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
         evento.button_id || null,
         evento.menu_key || null,
         evento.flow_key || null,
-        payload
-      ]
+        payload,
+        createdAt
+      ],
+      { createdAt }
     );
     return;
   }
 
   await ejecutarQueryConTimeout(
     `INSERT INTO chatbot_eventos
-      (event_type, user_hash, session_id, message_id, button_id, menu_key, flow_key, payload)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      (event_type, user_hash, session_id, message_id, button_id, menu_key, flow_key, payload, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       evento.event_type,
       evento.user_hash,
@@ -94,12 +102,41 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
       evento.button_id || null,
       evento.menu_key || null,
       evento.flow_key || null,
-      payload
-    ]
+      payload,
+      createdAt
+    ],
+    { createdAt }
   );
 }
 
-async function ejecutarQueryConTimeout(sql, params) {
+function obtenerFechaHoraMysqlEcuador(fecha = new Date()) {
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(fecha);
+
+  const valor = (tipo) => partes.find((parte) => parte.type === tipo)?.value;
+  return `${valor("year")}-${valor("month")}-${valor("day")} ${valor("hour")}:${valor("minute")}:${valor("second")}`;
+}
+
+async function ejecutarPoolConTimezone(sql, params, opciones = {}) {
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.query(`SET time_zone = '${DB_TIMEZONE}'`);
+    return await connection.execute(sql, params);
+  } finally {
+    connection.release();
+  }
+}
+
+async function ejecutarQueryConTimeout(sql, params, opciones = {}) {
   const startedAt = Date.now();
   let timeoutId;
 
@@ -110,7 +147,7 @@ async function ejecutarQueryConTimeout(sql, params) {
 
   try {
     const result = await Promise.race([
-      pool.execute(sql, params),
+      ejecutarPoolConTimezone(sql, params, opciones),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
@@ -148,7 +185,7 @@ async function ejecutarAsesorQuery(sql, params = [], action = "asesor_query") {
 
   try {
     const result = await Promise.race([
-      pool.execute(sql, params),
+      ejecutarPoolConTimezone(sql, params),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
@@ -185,7 +222,7 @@ async function ejecutarFeriadosQuery(sql, params = [], action = "feriados_query"
 
   try {
     const result = await Promise.race([
-      pool.execute(sql, params),
+      ejecutarPoolConTimezone(sql, params),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
