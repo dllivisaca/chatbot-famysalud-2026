@@ -5,10 +5,11 @@ const DB_QUERY_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.DB_QUERY_TIMEOUT_
 const DB_QUERY_TIMEOUT_MS = Number.isInteger(DB_QUERY_TIMEOUT_MS_CONFIG) && DB_QUERY_TIMEOUT_MS_CONFIG > 0
   ? DB_QUERY_TIMEOUT_MS_CONFIG
   : 10000;
+const DB_PORT_EFFECTIVE = Number.isInteger(DB_PORT) ? DB_PORT : 3306;
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
-  port: Number.isInteger(DB_PORT) ? DB_PORT : 3306,
+  port: DB_PORT_EFFECTIVE,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
@@ -17,10 +18,29 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
+console.log("[DB] Configuracion MySQL:", {
+  DB_HOST: process.env.DB_HOST || null,
+  DB_PORT: DB_PORT_EFFECTIVE,
+  DB_NAME: process.env.DB_NAME || null,
+  DB_USER: process.env.DB_USER || null
+});
+
 let soportaSessionId = true;
 
 function dbConfigurada() {
   return Boolean(process.env.DB_HOST && process.env.DB_USER && process.env.DB_NAME);
+}
+
+function construirDetalleErrorDb(error, contexto = {}) {
+  return {
+    ...contexto,
+    "error.message": error?.message || "",
+    "error.code": error?.code || null,
+    "error.errno": error?.errno || null,
+    "error.sqlMessage": error?.sqlMessage || null,
+    "error.sqlState": error?.sqlState || null,
+    "error.stack": error?.stack || null
+  };
 }
 
 async function insertarEvento(evento) {
@@ -105,11 +125,11 @@ async function ejecutarQueryConTimeout(sql, params) {
 
     return result;
   } catch (error) {
-    console.error("[DB] Error/timeout en pool.execute chatbot_eventos:", {
+    console.error("[DB] Error/timeout en pool.execute chatbot_eventos:", construirDetalleErrorDb(error, {
       eventType: params[0],
-      elapsedMs: Date.now() - startedAt,
-      error: error.message
-    });
+      action: "insert_chatbot_eventos",
+      elapsedMs: Date.now() - startedAt
+    }));
     throw error;
   } finally {
     if (timeoutId) {
@@ -143,11 +163,10 @@ async function ejecutarAsesorQuery(sql, params = [], action = "asesor_query") {
 
     return result;
   } catch (error) {
-    console.warn("[ASESOR_DB] Query fallo:", {
+    console.warn("[ASESOR_DB] Query fallo:", construirDetalleErrorDb(error, {
       action,
-      elapsedMs: Date.now() - startedAt,
-      error: error.message
-    });
+      elapsedMs: Date.now() - startedAt
+    }));
     throw error;
   } finally {
     if (timeoutId) {

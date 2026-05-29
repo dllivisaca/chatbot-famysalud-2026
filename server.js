@@ -195,6 +195,8 @@ function registrarEvento(from, eventType, datos = {}) {
     flowKey: evento.flow_key
   });
 
+  const startedAt = Date.now();
+
   insertarEvento(evento)
     .then(() => {
       console.log("[EVENTO] Despues de insertar evento:", {
@@ -203,8 +205,24 @@ function registrarEvento(from, eventType, datos = {}) {
       });
     })
     .catch((error) => {
-      console.error("[EVENTO] Error registrando evento:", error.message);
+      console.error("[EVENTO] Error registrando evento:", construirDetalleErrorLog(error, {
+        eventType,
+        action: "registrarEvento",
+        elapsedMs: Date.now() - startedAt
+      }));
     });
+}
+
+function construirDetalleErrorLog(error, contexto = {}) {
+  return {
+    ...contexto,
+    "error.message": error?.message || "",
+    "error.code": error?.code || null,
+    "error.errno": error?.errno || null,
+    "error.sqlMessage": error?.sqlMessage || null,
+    "error.sqlState": error?.sqlState || null,
+    "error.stack": error?.stack || null
+  };
 }
 
 function obtenerFlowKeyAsesor(origen = "paciente") {
@@ -709,11 +727,15 @@ function obtenerSesionAsesor(asesorId) {
 
 function encolarPersistenciaAsesor(key, action, task) {
   const anterior = persistenciasAsesorPendientes.get(key) || Promise.resolve();
+  const startedAt = Date.now();
   const siguiente = anterior
     .catch(() => {})
     .then(task)
     .catch((error) => {
-      console.warn(`[ASESOR_DB] ${action}. Continuando en memoria:`, error.message);
+      console.warn(`[ASESOR_DB] ${action}. Continuando en memoria:`, construirDetalleErrorLog(error, {
+        action,
+        elapsedMs: Date.now() - startedAt
+      }));
     })
     .finally(() => {
       if (persistenciasAsesorPendientes.get(key) === siguiente) {
@@ -5359,6 +5381,8 @@ function construirSesionAsesorDesdePersistencia(row) {
 }
 
 async function restaurarEstadoAsesoresDesdeBD() {
+  const startedAt = Date.now();
+
   try {
     const estado = await obtenerEstadoAsesoresPersistido();
 
@@ -5399,7 +5423,10 @@ async function restaurarEstadoAsesoresDesdeBD() {
       sesionesActivas: Array.from(sesionesAsesores.values()).filter((sesion) => sesion.estado !== "libre").length
     });
   } catch (error) {
-    console.warn("[ASESOR_DB] No se pudo restaurar estado. Iniciando solo en memoria:", error.message);
+    console.warn("[ASESOR_DB] No se pudo restaurar estado. Iniciando solo en memoria:", construirDetalleErrorLog(error, {
+      action: "restore_active",
+      elapsedMs: Date.now() - startedAt
+    }));
   }
 }
 
