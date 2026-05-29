@@ -34,6 +34,7 @@ const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
+const APPOINTMENT_TEST_PHONE = "+593990043768";
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
 const INTERNAL_NOTIFICATION_EMAIL = process.env.INTERNAL_NOTIFICATION_EMAIL || process.env.RESULTS_INTERNAL_EMAIL;
 const INTERNAL_EMAIL_FROM = process.env.INTERNAL_EMAIL_FROM || process.env.RESULTS_EMAIL_FROM;
@@ -125,6 +126,19 @@ let ultimaRevisionRecordatorioFeriados = null;
 
 function flagActiva(value) {
   return String(value || "").trim().toLowerCase() === "true";
+}
+
+function normalizarNumeroWhatsApp(numero) {
+  const soloDigitos = String(numero || "")
+    .replace(/@.+$/, "")
+    .replace(/\D/g, "");
+
+  return soloDigitos ? `+${soloDigitos}` : "";
+}
+
+function puedeUsarAgendamiento(numeroUsuario) {
+  return featureHabilitada(ENABLE_APPOINTMENT_BOOKING)
+    && normalizarNumeroWhatsApp(numeroUsuario) === normalizarNumeroWhatsApp(APPOINTMENT_TEST_PHONE);
 }
 
 function esNumeroInterno(numero) {
@@ -2032,17 +2046,18 @@ async function manejarBoton(to, buttonId, messageId) {
   }
 
   if (accion.type === "appointment_booking") {
-    if (!featureHabilitada(ENABLE_APPOINTMENT_BOOKING)) {
+    if (!puedeUsarAgendamiento(to)) {
       registrarEvento(to, "flow_completed", {
         messageId,
         buttonId,
         flowKey: buttonId,
         payload: {
           actionType: accion.type,
-          enabled: false
+          enabled: false,
+          allowed: false
         }
       });
-      await enviarMensajeConMenuPrincipal(to, accion.text);
+      await enviarMenu(to, "pacientes");
       return;
     }
 
@@ -4472,7 +4487,7 @@ function calcularPrecioEstandarTarjeta(valor) {
   return Math.round((numero / 0.9425) * 100) / 100;
 }
 
-function construirBloquesPrecioServicio(servicio) {
+function construirBloquesPrecioServicio(servicio, numeroUsuario) {
   const precio = obtenerPrecioNumerico(servicio.price);
   const precioPromocional = obtenerPrecioNumerico(servicio.sale_price);
 
@@ -4494,7 +4509,9 @@ function construirBloquesPrecioServicio(servicio) {
     );
   }
 
-  return bloques.join("\n\n");
+  return bloques
+    .filter((bloque) => puedeUsarAgendamiento(numeroUsuario) || !String(bloque).includes("agendar en"))
+    .join("\n\n");
 }
 
 function tienePromocion(servicio) {
@@ -4525,10 +4542,10 @@ function construirTextoModalidad(servicio) {
   return "🩺 Modalidad:\nInformación de modalidad disponible con un asesor.";
 }
 
-function construirMensajeDetalleServicio(servicio) {
+function construirMensajeDetalleServicio(servicio, numeroUsuario) {
   const bloques = [
     `📌 Servicio: ${servicio.title}`,
-    construirBloquesPrecioServicio(servicio)
+    construirBloquesPrecioServicio(servicio, numeroUsuario)
   ];
 
   bloques.push(construirTextoModalidad(servicio));
@@ -4741,7 +4758,7 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId, origen 
       servicioTitle: servicioSeleccionado.title
     }
   });
-  await enviarDetalleServicioConOpciones(from, construirMensajeDetalleServicio(servicioSeleccionado));
+  await enviarDetalleServicioConOpciones(from, construirMensajeDetalleServicio(servicioSeleccionado, from));
 }
 
 async function enviarAreasCotizacion(to) {
@@ -4788,7 +4805,7 @@ function mensajeErrorCatalogo() {
 }
 
 async function enviarMenu(to, menuKey) {
-  const menu = MENUS[menuKey];
+  const menu = obtenerMenuDisponible(menuKey, to);
 
   if (!menu) {
     console.warn("[MENU] Menu no encontrado:", menuKey);
@@ -4799,6 +4816,23 @@ async function enviarMenu(to, menuKey) {
   console.log("[MENU] Enviando:", menuKey);
   await enviarBotones(to, menu.text, menu.buttons);
   registrarEvento(to, "menu_opened", { menuKey });
+}
+
+function obtenerMenuDisponible(menuKey, numeroUsuario) {
+  const menu = MENUS[menuKey];
+
+  if (!menu) {
+    return null;
+  }
+
+  if (menuKey !== "pacientes" || puedeUsarAgendamiento(numeroUsuario)) {
+    return menu;
+  }
+
+  return {
+    ...menu,
+    buttons: menu.buttons.filter((button) => button.reply?.id !== "paciente_agendar_cita")
+  };
 }
 
 async function enviarBotones(to, bodyText, buttons) {
