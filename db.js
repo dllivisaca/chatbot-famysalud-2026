@@ -1,6 +1,10 @@
 const mysql = require("mysql2/promise");
 
 const DB_PORT = Number.parseInt(process.env.DB_PORT || "3306", 10);
+const DB_QUERY_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.DB_QUERY_TIMEOUT_MS || "10000", 10);
+const DB_QUERY_TIMEOUT_MS = Number.isInteger(DB_QUERY_TIMEOUT_MS_CONFIG) && DB_QUERY_TIMEOUT_MS_CONFIG > 0
+  ? DB_QUERY_TIMEOUT_MS_CONFIG
+  : 10000;
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
@@ -41,7 +45,7 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
   const payload = evento.payload ? JSON.stringify(evento.payload) : null;
 
   if (!incluirSessionId) {
-    await pool.execute(
+    await ejecutarQueryConTimeout(
       `INSERT INTO chatbot_eventos
         (event_type, user_hash, message_id, button_id, menu_key, flow_key, payload)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -58,7 +62,7 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
     return;
   }
 
-  await pool.execute(
+  await ejecutarQueryConTimeout(
     `INSERT INTO chatbot_eventos
       (event_type, user_hash, session_id, message_id, button_id, menu_key, flow_key, payload)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -73,6 +77,45 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
       payload
     ]
   );
+}
+
+async function ejecutarQueryConTimeout(sql, params) {
+  const startedAt = Date.now();
+  let timeoutId;
+
+  console.log("[DB] Antes await pool.execute chatbot_eventos:", {
+    eventType: params[0],
+    timeoutMs: DB_QUERY_TIMEOUT_MS
+  });
+
+  try {
+    const result = await Promise.race([
+      pool.execute(sql, params),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
+        }, DB_QUERY_TIMEOUT_MS);
+      })
+    ]);
+
+    console.log("[DB] Despues await pool.execute chatbot_eventos:", {
+      eventType: params[0],
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return result;
+  } catch (error) {
+    console.error("[DB] Error/timeout en pool.execute chatbot_eventos:", {
+      eventType: params[0],
+      elapsedMs: Date.now() - startedAt,
+      error: error.message
+    });
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function columnaSessionIdNoExiste(error) {

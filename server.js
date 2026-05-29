@@ -29,6 +29,10 @@ const SMTP_SECURE = flagActiva(process.env.SMTP_SECURE);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
 const WHATSAPP_API_VERSION = "v20.0";
+const WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.WHATSAPP_REQUEST_TIMEOUT_MS || "15000", 10);
+const WHATSAPP_REQUEST_TIMEOUT_MS = Number.isInteger(WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG) && WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG > 0
+  ? WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG
+  : 15000;
 const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "15", 10);
 const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
   ? SESSION_TTL_MINUTES
@@ -59,8 +63,8 @@ const sesionesAlianza = new Map();
 const mensajesProcesados = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
-const ASESOR_WHATSAPP_PRINCIPAL = process.env.ASESOR_WHATSAPP_PRINCIPAL || "593989729682";
-const ASESOR_WHATSAPP_SECUNDARIO = process.env.ASESOR_WHATSAPP_SECUNDARIO || "593989881894";
+const ASESOR_WHATSAPP_PRINCIPAL = process.env.ASESOR_WHATSAPP_PRINCIPAL || "593939034743";
+const ASESOR_WHATSAPP_SECUNDARIO = process.env.ASESOR_WHATSAPP_SECUNDARIO || "593939867396";
 const ASESORES_WHATSAPP = [
   { id: "principal", phone: ASESOR_WHATSAPP_PRINCIPAL },
   { id: "secundario", phone: ASESOR_WHATSAPP_SECUNDARIO }
@@ -70,8 +74,7 @@ const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
 const temporizadoresSesionAsesor = new Map();
 const NUMEROS_INTERNOS = [
-  ...ASESORES_WHATSAPP.map((asesor) => asesor.phone),
-  "593939034743"
+  ...ASESORES_WHATSAPP.map((asesor) => asesor.phone)
 ];
 const ASESORES_REGISTRADOS = {
   jennifer: { nombre: "Jennifer", cargo: "asesora" },
@@ -127,7 +130,7 @@ function registrarEvento(from, eventType, datos = {}) {
     return;
   }
 
-  insertarEvento({
+  const evento = {
     event_type: eventType,
     user_hash: hashUsuario(from),
     session_id: datos.sessionId || obtenerSessionId(from),
@@ -136,9 +139,25 @@ function registrarEvento(from, eventType, datos = {}) {
     menu_key: datos.menuKey,
     flow_key: datos.flowKey,
     payload: datos.payload
-  }).catch((error) => {
-    console.error("[EVENTO] Error registrando evento:", error.message);
+  };
+
+  console.log("[EVENTO] Antes de insertar evento:", {
+    eventType,
+    sessionId: evento.session_id,
+    messageId: evento.message_id,
+    flowKey: evento.flow_key
   });
+
+  insertarEvento(evento)
+    .then(() => {
+      console.log("[EVENTO] Despues de insertar evento:", {
+        eventType,
+        sessionId: evento.session_id
+      });
+    })
+    .catch((error) => {
+      console.error("[EVENTO] Error registrando evento:", error.message);
+    });
 }
 
 function obtenerFlowKeyAsesor(origen = "paciente") {
@@ -730,10 +749,10 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       await enviarMensajeTexto(
         paciente,
         esProveedor || esProveedorExistente || esAlianzaPotencial || esAlianzaExistente
-          ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
+          ? "⏳ En este momento nuestros asesores están atendiendo otros chats.\n\nTe dejamos en cola y en cuanto haya disponibilidad, un asesor continuará contigo por aquí. Gracias por tu paciencia 💙"
           : esEmpresa
-          ? "💬 En este momento nuestros asesores están atendiendo otra solicitud.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
-          : "💬 En este momento nuestros asesores están atendiendo a otro paciente.\n\nTe agregamos a la cola de espera. Te avisaremos cuando sea tu turno 😊"
+          ? "⏳ En este momento nuestros asesores están atendiendo otros chats.\n\nTe dejamos en cola y en cuanto haya disponibilidad, un asesor continuará contigo por aquí. Gracias por tu paciencia 💙"
+          : "⏳ En este momento nuestros asesores están atendiendo otros chats.\n\nTe dejamos en cola y en cuanto haya disponibilidad, un asesor continuará contigo por aquí. Gracias por tu paciencia 💙"
       );
       return;
     }
@@ -854,16 +873,42 @@ async function manejarMensajeAsesor(from, rawText, message) {
         asesor: from,
         paciente: sesionAsesor.paciente
       });
-      await enviarMensajeTexto(sesionAsesor.paciente, mensaje);
+      try {
+        console.log("[ASESOR] Antes await enviarMensajeTexto asesor->paciente:", {
+          asesor: from,
+          paciente: sesionAsesor.paciente
+        });
+        await enviarMensajeTexto(sesionAsesor.paciente, mensaje);
+        console.log("[ASESOR] Despues await enviarMensajeTexto asesor->paciente:", {
+          asesor: from,
+          paciente: sesionAsesor.paciente
+        });
+      } catch (error) {
+        console.error("[ASESOR] Error reenviando mensaje al paciente:", error.response?.data || error.message);
+      }
       return true;
     }
 
-    if (await reenviarMensajeMultimediaSeguro(sesionAsesor.paciente, message, from)) {
-      console.log("[ASESOR] Multimedia reenviado al paciente:", {
+    try {
+      console.log("[ASESOR] Antes await reenviarMensajeMultimediaSeguro asesor->paciente:", {
         asesor: from,
         paciente: sesionAsesor.paciente,
-        tipo: message.type
+        tipo: message?.type
       });
+      if (await reenviarMensajeMultimediaSeguro(sesionAsesor.paciente, message, from)) {
+        console.log("[ASESOR] Multimedia reenviado al paciente:", {
+          asesor: from,
+          paciente: sesionAsesor.paciente,
+          tipo: message.type
+        });
+      }
+      console.log("[ASESOR] Despues await reenviarMensajeMultimediaSeguro asesor->paciente:", {
+        asesor: from,
+        paciente: sesionAsesor.paciente,
+        tipo: message?.type
+      });
+    } catch (error) {
+      console.error("[ASESOR] Error inesperado reenviando multimedia al paciente:", error.response?.data || error.message);
     }
     return true;
   }
@@ -1298,10 +1343,20 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
       asesor: sesionAsesor.asesor,
       origen
     });
+    console.log("[PACIENTE] Antes await enviarMensajeTexto usuario->asesor:", {
+      paciente: from,
+      asesor: sesionAsesor.asesor,
+      origen
+    });
     await enviarMensajeTexto(
       sesionAsesor.asesor,
       origen === "alianza_existente" ? `🤝 Aliado Estratégico:\n${mensaje}` : origen === "alianza_potencial" ? `🤝 Alianza Potencial:\n${mensaje}` : origen === "proveedor_existente" ? `🤝 Proveedor Existente:\n${mensaje}` : origen === "proveedor" ? `🤝 Potencial Proveedor:\n${mensaje}` : origen === "empresa" ? `🏢 Empresa:\n${mensaje}` : `👤 Paciente:\n${mensaje}`
     );
+    console.log("[PACIENTE] Despues await enviarMensajeTexto usuario->asesor:", {
+      paciente: from,
+      asesor: sesionAsesor.asesor,
+      origen
+    });
     reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
     return true;
   }
@@ -1317,9 +1372,21 @@ async function manejarMensajePacienteAsesor(from, rawText, message) {
       sesionAsesor.asesor,
       origen === "alianza_existente" ? "🤝 Aliado Estratégico envió un archivo:" : origen === "alianza_potencial" ? "🤝 Alianza Potencial envió un archivo:" : origen === "proveedor_existente" ? "🤝 Proveedor Existente envió un archivo:" : origen === "proveedor" ? "🤝 Potencial Proveedor envió un archivo:" : origen === "empresa" ? "🏢 Empresa envió un archivo:" : "👤 Paciente envió un archivo:"
     );
+    console.log("[PACIENTE] Antes await reenviarMensajeMultimediaSeguro usuario->asesor:", {
+      paciente: from,
+      asesor: sesionAsesor.asesor,
+      tipo: message?.type,
+      origen
+    });
     if (await reenviarMensajeMultimediaSeguro(sesionAsesor.asesor, message, from)) {
       reiniciarTemporizadorSesionAsesor(sesionAsesor.asesorId);
     }
+    console.log("[PACIENTE] Despues await reenviarMensajeMultimediaSeguro usuario->asesor:", {
+      paciente: from,
+      asesor: sesionAsesor.asesor,
+      tipo: message?.type,
+      origen
+    });
   }
 
   return true;
@@ -4283,10 +4350,21 @@ async function subirMediaWhatsAppDesdeArchivo(relativePath, mimeType) {
   formData.append("file", new Blob([fileBuffer], { type: mimeType }), path.basename(absolutePath));
 
   const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${PHONE_NUMBER_ID}/media`;
+  console.log("[WHATSAPP_MEDIA] Antes await axios.post /media:", {
+    relativePath,
+    mimeType,
+    timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS
+  });
   const response = await axios.post(url, formData, {
+    timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`
     }
+  });
+  console.log("[WHATSAPP_MEDIA] Despues await axios.post /media:", {
+    relativePath,
+    status: response.status,
+    mediaId: response.data?.id
   });
 
   return response.data?.id || null;
@@ -4402,7 +4480,23 @@ async function enviarMensajeTexto(to, message) {
     }
   };
 
-  await enviarWhatsApp(payload);
+  console.log("[WHATSAPP_TEXT] Antes await enviarWhatsApp:", {
+    to,
+    length: String(message || "").length
+  });
+
+  try {
+    await enviarWhatsApp(payload);
+    console.log("[WHATSAPP_TEXT] Despues await enviarWhatsApp:", {
+      to,
+      length: String(message || "").length
+    });
+  } catch (error) {
+    console.error("[WHATSAPP_TEXT] Error enviando texto:", {
+      to,
+      error: error.response?.data || error.message
+    });
+  }
 }
 
 function esMensajeMultimedia(message) {
@@ -4411,7 +4505,17 @@ function esMensajeMultimedia(message) {
 
 async function reenviarMensajeMultimediaSeguro(destino, message, remitente) {
   try {
-    return await reenviarMensajeMultimedia(destino, message);
+    console.log("[MEDIA] Antes await reenviarMensajeMultimedia:", {
+      destino,
+      tipo: message?.type
+    });
+    const reenviado = await reenviarMensajeMultimedia(destino, message);
+    console.log("[MEDIA] Despues await reenviarMensajeMultimedia:", {
+      destino,
+      tipo: message?.type,
+      reenviado
+    });
+    return reenviado;
   } catch (error) {
     console.warn("[MEDIA] Error reenviando multimedia:", {
       tipo: message?.type,
@@ -4420,10 +4524,25 @@ async function reenviarMensajeMultimediaSeguro(destino, message, remitente) {
     });
 
     if (message?.type === "video" && remitente) {
-      await enviarMensajeTexto(
-        remitente,
-        "No pudimos reenviar ese video. Por favor intenta enviarlo nuevamente o compártelo como documento."
-      );
+      try {
+        console.log("[MEDIA] Antes await enviarMensajeTexto aviso fallo video:", {
+          remitente,
+          destino
+        });
+        await enviarMensajeTexto(
+          remitente,
+          "No pudimos reenviar ese video. Por favor intenta enviarlo nuevamente o compártelo como documento."
+        );
+        console.log("[MEDIA] Despues await enviarMensajeTexto aviso fallo video:", {
+          remitente,
+          destino
+        });
+      } catch (notifyError) {
+        console.warn("[MEDIA] No se pudo notificar fallo de video:", {
+          remitente,
+          error: notifyError.response?.data || notifyError.message
+        });
+      }
     }
 
     return false;
@@ -4495,10 +4614,19 @@ async function reenviarVideoWhatsApp(destino, message) {
 
   try {
     const mediaUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${mediaId}`;
+    console.log("[MEDIA_VIDEO] Antes await axios.get metadata:", {
+      mediaId,
+      timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS
+    });
     const metadata = await axios.get(mediaUrl, {
+      timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
       headers: {
         Authorization: `Bearer ${WHATSAPP_TOKEN}`
       }
+    });
+    console.log("[MEDIA_VIDEO] Despues await axios.get metadata:", {
+      mediaId,
+      status: metadata.status
     });
     const downloadUrl = metadata.data?.url;
 
@@ -4506,11 +4634,21 @@ async function reenviarVideoWhatsApp(destino, message) {
       throw new Error("No se recibió URL temporal para descargar el video.");
     }
 
+    console.log("[MEDIA_VIDEO] Antes await axios.get descarga:", {
+      mediaId,
+      timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS
+    });
     const response = await axios.get(downloadUrl, {
+      timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
       responseType: "arraybuffer",
       headers: {
         Authorization: `Bearer ${WHATSAPP_TOKEN}`
       }
+    });
+    console.log("[MEDIA_VIDEO] Despues await axios.get descarga:", {
+      mediaId,
+      status: response.status,
+      bytes: response.data?.byteLength
     });
     const mimeType = media.mime_type || response.headers["content-type"] || "video/mp4";
     const tmpDir = path.join(__dirname, "tmp", "asesor-videos");
@@ -4527,10 +4665,21 @@ async function reenviarVideoWhatsApp(destino, message) {
     formData.append("file", new Blob([fileBuffer], { type: mimeType }), filename);
 
     const uploadUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${PHONE_NUMBER_ID}/media`;
+    console.log("[MEDIA_VIDEO] Antes await axios.post upload:", {
+      mediaId,
+      mimeType,
+      timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS
+    });
     const upload = await axios.post(uploadUrl, formData, {
+      timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
       headers: {
         Authorization: `Bearer ${WHATSAPP_TOKEN}`
       }
+    });
+    console.log("[MEDIA_VIDEO] Despues await axios.post upload:", {
+      mediaId,
+      status: upload.status,
+      nuevoMediaId: upload.data?.id
     });
     const nuevoMediaId = upload.data?.id;
 
@@ -4590,12 +4739,33 @@ async function enviarWhatsApp(payload) {
     type: payload.type
   });
 
-  await axios.post(url, payload, {
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
-    }
-  });
+  try {
+    console.log("[WHATSAPP] Antes await axios.post /messages:", {
+      to: payload.to,
+      type: payload.type,
+      timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS
+    });
+    const response = await axios.post(url, payload, {
+      timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    });
+    console.log("[WHATSAPP] Despues await axios.post /messages:", {
+      to: payload.to,
+      type: payload.type,
+      status: response.status
+    });
+  } catch (error) {
+    console.error("[WHATSAPP] Error en axios.post /messages:", {
+      to: payload.to,
+      type: payload.type,
+      code: error.code,
+      error: error.response?.data || error.message
+    });
+    throw error;
+  }
 }
 
 app.listen(PORT, () => {
