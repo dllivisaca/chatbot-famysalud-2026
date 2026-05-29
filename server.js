@@ -770,6 +770,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   }
 
   const sesionAsesor = guardarSesionAsesor(asesorLibre.id, construirSesionAsesorAsignada(asesorLibre, paciente, origen));
+  cancelarExpiracionSesion(paciente);
 
   console.log("[SESION] Asesor esperando nombre:", sesionAsesor);
   registrarEvento(paciente, "advisor_session_requested", {
@@ -1117,6 +1118,10 @@ function pacienteEstaEnColaAsesor(numero) {
   return colaEsperaAsesor.some((item) => item.paciente === numero);
 }
 
+function estaEnFlujoAsesor(phone) {
+  return pacienteEstaEnColaAsesor(phone) || Boolean(obtenerSesionAsesorPorPaciente(phone));
+}
+
 async function manejarMensajeUsuarioEnEsperaAsesor(from) {
   const sesionAsesor = obtenerSesionAsesorPorPaciente(from);
 
@@ -1144,6 +1149,7 @@ function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
     return false;
   }
 
+  cancelarExpiracionSesion(paciente);
   colaEsperaAsesor.push({
     paciente,
     origen,
@@ -1290,6 +1296,7 @@ async function atenderSiguientePacienteEnCola(asesorId) {
     asesorId,
     construirSesionAsesorAsignada(asesor, siguiente.paciente, siguiente.origen || "paciente", { waitMs })
   );
+  cancelarExpiracionSesion(sesionAsesor.paciente);
 
   console.log("[COLA_ASESOR] Atendiendo siguiente paciente en cola:", {
     paciente: sesionAsesor.paciente,
@@ -3451,6 +3458,11 @@ async function expirarSesionUsuario(from) {
     return;
   }
 
+  if (estaEnFlujoAsesor(from)) {
+    cancelarExpiracionSesion(from);
+    return;
+  }
+
   if (obtenerSesionProveedor(from)) {
     await expirarSolicitudProveedorPorInactividad(from);
     return;
@@ -3504,6 +3516,11 @@ function consumirSesionUsuarioExpirada(from) {
   const sesion = obtenerSesionUsuario(from);
 
   if (!sesion || !sesionExpirada(sesion)) {
+    return false;
+  }
+
+  if (estaEnFlujoAsesor(from)) {
+    cancelarExpiracionSesion(from);
     return false;
   }
 
