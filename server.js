@@ -39,6 +39,8 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const CHATBOT_CATALOG_BASE_URL = process.env.CHATBOT_CATALOG_BASE_URL;
 const CHATBOT_CATALOG_PATH = process.env.CHATBOT_CATALOG_PATH;
+const APPWEB_API_BASE_URL = process.env.APPWEB_API_BASE_URL || "https://app.famysaludec.com";
+const APPWEB_CHATBOT_API_KEY = process.env.APPWEB_CHATBOT_API_KEY;
 const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
@@ -2452,8 +2454,7 @@ Ejemplo: 1`
 
   if (modalidades.length === 1) {
     const modalidad = modalidades[0];
-
-    sesionesAgendamiento.set(from, {
+    const nuevaSesion = {
       ...sesion,
       paso: "seleccionando_fecha",
       professionalId: profesionalSeleccionado.id,
@@ -2462,16 +2463,10 @@ Ejemplo: 1`
       appointmentMode: modalidad.value,
       modalidadSeleccionUnica: true,
       timestamp: Date.now()
-    });
+    };
 
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      `Profesional seleccionado: ${profesionalSeleccionado.name}
-
-Modalidad disponible: ${modalidad.label}
-
-Continuemos con la fecha.`
-    );
+    sesionesAgendamiento.set(from, nuevaSesion);
+    await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
     return;
   }
 
@@ -2513,13 +2508,15 @@ Por favor responde con 1 para Presencial o 2 para Virtual.`
     return;
   }
 
-  sesionesAgendamiento.set(from, {
+  const nuevaSesion = {
     ...sesion,
     paso: "seleccionando_fecha",
     appointmentMode: modalidadSeleccionada.value,
     modalidadSeleccionUnica: false,
     timestamp: Date.now()
-  });
+  };
+
+  sesionesAgendamiento.set(from, nuevaSesion);
 
   registrarEvento(from, "button_click", {
     messageId,
@@ -2533,12 +2530,7 @@ Por favor responde con 1 para Presencial o 2 para Virtual.`
     }
   });
 
-  await enviarMensajeAgendamientoConNavegacion(
-    from,
-    `Modalidad seleccionada: ${modalidadSeleccionada.label}
-
-Ahora continuaremos con la selección de fecha.`
-  );
+  await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
 }
 
 async function volverAgendamiento(to, messageId) {
@@ -5029,6 +5021,171 @@ Selecciona la modalidad de atención:
 2. Virtual
 
 Responde con el número de la modalidad.
+Ejemplo: 1`;
+}
+
+async function iniciarSeleccionFechaAgendamiento(to, sesion) {
+  try {
+    const fechas = await consultarFechasDisponiblesAgendamiento(sesion);
+
+    sesionesAgendamiento.set(to, {
+      ...sesionesAgendamiento.get(to),
+      paso: "seleccionando_fecha",
+      fechasDisponibles: fechas.fechasDisponibles,
+      minAllowed: fechas.minAllowed,
+      maxAllowed: fechas.maxAllowed,
+      timestamp: Date.now()
+    });
+
+    if (!fechas.fechasDisponibles.length) {
+      await enviarMensajeAgendamientoConNavegacion(
+        to,
+        "Por ahora no encontramos fechas disponibles para este profesional y servicio en el mes actual. Puedes volver atrás o regresar al menú principal."
+      );
+      return;
+    }
+
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeFechasAgendamiento(fechas.fechasDisponibles),
+      "seleccionando_fecha"
+    );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudieron cargar fechas disponibles:", construirDetalleErrorLog(error, {
+      action: "load_available_dates",
+      flowKey: "agendamiento_fechas",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    }));
+
+    await enviarMensajeAgendamientoConNavegacion(
+      to,
+      "No pude cargar las fechas disponibles en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
+    );
+  }
+}
+
+async function consultarFechasDisponiblesAgendamiento(sesion) {
+  if (!APPWEB_CHATBOT_API_KEY) {
+    throw new Error("Falta APPWEB_CHATBOT_API_KEY para consultar fechas disponibles.");
+  }
+
+  const { mes, anio } = obtenerMesAnioActualAgendamiento();
+  const url = construirAppWebApiUrl(`/api/chatbot/employees/${encodeURIComponent(sesion.professionalId)}/available-dates`);
+
+  console.log("[AGENDAMIENTO_API] Consultando fechas disponibles:", {
+    action: "available_dates_select",
+    professionalId: sesion.professionalId,
+    serviceId: sesion.serviceId,
+    month: mes,
+    year: anio
+  });
+
+  const response = await axios.get(url, {
+    timeout: 10000,
+    params: {
+      service_id: sesion.serviceId,
+      month: mes,
+      year: anio
+    },
+    headers: {
+      "X-Chatbot-Api-Key": APPWEB_CHATBOT_API_KEY
+    }
+  });
+
+  return normalizarRespuestaFechasDisponibles(response.data);
+}
+
+function construirAppWebApiUrl(pathname) {
+  const baseUrl = String(APPWEB_API_BASE_URL || "").trim().replace(/\/+$/, "");
+  const pathApi = String(pathname || "").trim().replace(/^\/+/, "");
+
+  if (!baseUrl) {
+    throw new Error("Falta APPWEB_API_BASE_URL para consultar la API de la app web.");
+  }
+
+  return `${baseUrl}/${pathApi}`;
+}
+
+function obtenerMesAnioActualAgendamiento(fecha = new Date()) {
+  const { mes, anio } = obtenerFechaHoraEcuador(fecha);
+  return {
+    mes: Number.parseInt(mes, 10),
+    anio: Number.parseInt(anio, 10)
+  };
+}
+
+function normalizarRespuestaFechasDisponibles(data) {
+  const posiblesListas = [
+    data?.available_dates,
+    data?.dates,
+    data?.data?.available_dates,
+    data?.data?.dates,
+    data?.data,
+    data
+  ];
+  const lista = posiblesListas.find((item) => Array.isArray(item)) || [];
+  const fechasDisponibles = lista
+    .map((item) => normalizarFechaDisponible(item))
+    .filter(Boolean);
+  const minAllowed = obtenerValorFechaPermitida(data, "minAllowed", "min_allowed") || fechasDisponibles[0]?.date || null;
+  const maxAllowed = obtenerValorFechaPermitida(data, "maxAllowed", "max_allowed")
+    || fechasDisponibles[fechasDisponibles.length - 1]?.date
+    || null;
+
+  return {
+    fechasDisponibles,
+    minAllowed,
+    maxAllowed
+  };
+}
+
+function normalizarFechaDisponible(item) {
+  const date = typeof item === "string"
+    ? item
+    : item?.date || item?.fecha || item?.value || item?.day;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+    return null;
+  }
+
+  return {
+    date,
+    label: formatearFechaDisponibleAgendamiento(date),
+    raw: item
+  };
+}
+
+function obtenerValorFechaPermitida(data, camelKey, snakeKey) {
+  return data?.[camelKey]
+    || data?.[snakeKey]
+    || data?.data?.[camelKey]
+    || data?.data?.[snakeKey]
+    || null;
+}
+
+function formatearFechaDisponibleAgendamiento(fechaISO) {
+  const [anio, mes, dia] = String(fechaISO).split("-").map((parte) => Number.parseInt(parte, 10));
+  const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
+  const diaSemana = new Intl.DateTimeFormat("es-EC", {
+    weekday: "long",
+    timeZone: "UTC"
+  }).format(fecha);
+  const diaCapitalizado = diaSemana.charAt(0).toUpperCase() + diaSemana.slice(1);
+
+  return `${diaCapitalizado} ${String(dia).padStart(2, "0")}/${String(mes).padStart(2, "0")}/${anio}`;
+}
+
+function construirMensajeFechasAgendamiento(fechasDisponibles) {
+  const listadoFechas = fechasDisponibles
+    .map((fecha, index) => `${index + 1}. ${fecha.label}`)
+    .join("\n");
+
+  return `Selecciona la fecha de tu cita:
+
+${listadoFechas}
+
+Responde con el número de la fecha.
 Ejemplo: 1`;
 }
 
