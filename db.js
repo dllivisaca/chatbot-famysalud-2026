@@ -312,6 +312,73 @@ async function obtenerAreasAgendables() {
   }
 }
 
+async function obtenerServiciosAgendablesPorArea(areaId) {
+  if (!dbConfigurada()) {
+    return [];
+  }
+
+  const startedAt = Date.now();
+  let timeoutId;
+
+  try {
+    console.log("[AGENDAMIENTO_DB] Consultando servicios por área...", {
+      action: "appointment_services_by_area_select",
+      table: "famysufk_appointments.services",
+      areaId
+    });
+
+    const [rows] = await Promise.race([
+      ejecutarPoolConTimezone(
+        `SELECT id, title, price, sale_price, is_presential, is_virtual
+         FROM famysufk_appointments.services
+         WHERE category_id = ?
+           AND status = ?
+           AND deleted_at IS NULL
+         ORDER BY title ASC`,
+        [areaId, 1]
+      ),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
+        }, DB_QUERY_TIMEOUT_MS);
+      })
+    ]);
+
+    console.log("[AGENDAMIENTO_DB] Servicios por área consultados:", {
+      action: "appointment_services_by_area_select",
+      areaId,
+      total: rows.length,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return rows
+      .map((row) => ({
+        id: row.id,
+        title: typeof row.title === "string" ? row.title.trim() : "",
+        price: row.price,
+        sale_price: row.sale_price,
+        is_presential: Boolean(row.is_presential),
+        is_virtual: Boolean(row.is_virtual)
+      }))
+      .filter((row) => row.title);
+  } catch (error) {
+    const detalleError = construirDetalleErrorDb(error, {
+      action: "appointment_services_by_area_select",
+      table: "famysufk_appointments.services",
+      areaId,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    console.warn("[AGENDAMIENTO_DB] Error consultando servicios por área:", detalleError);
+    console.error("[AGENDAMIENTO_DB] Error consultando servicios por área:", detalleError);
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function obtenerFeriadosPendientesRecordatorio(fechaFeriado) {
   if (!dbConfigurada()) {
     return [];
@@ -571,6 +638,7 @@ function columnaSessionIdNoExiste(error) {
 module.exports = {
   insertarEvento,
   obtenerAreasAgendables,
+  obtenerServiciosAgendablesPorArea,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,

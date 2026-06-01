@@ -12,6 +12,7 @@ const nodemailer = require("nodemailer");
 const {
   insertarEvento,
   obtenerAreasAgendables,
+  obtenerServiciosAgendablesPorArea,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
@@ -431,7 +432,7 @@ const ACCIONES_BOTONES = {
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text_with_main_menu", text: TEXTOS.trabaja },
   volver_cotizar: { type: "restart_quote" },
-  agendamiento_volver: { type: "menu", menu: "pacientes" },
+  agendamiento_volver: { type: "appointment_back" },
 
   paciente_agendar_cita: { type: "appointment_booking", text: `¡Perfecto! 💙
 
@@ -668,6 +669,11 @@ app.post("/webhook", async (req, res) => {
 
     if (estaEnFlujoAlianza(from)) {
       await manejarSolicitudAlianza(from, rawText, message, messageId);
+      return res.sendStatus(200);
+    }
+
+    if (!buttonId && !listReplyId && estaEnFlujoAgendamiento(from)) {
+      await manejarFlujoAgendamiento(from, rawText, messageId);
       return res.sendStatus(200);
     }
 
@@ -2018,6 +2024,11 @@ async function manejarBoton(to, buttonId, messageId) {
     return;
   }
 
+  if (accion.type === "appointment_back") {
+    await volverAgendamiento(to, messageId);
+    return;
+  }
+
   if (accion.type === "results_request") {
     await iniciarSolicitudResultados(to, messageId);
     return;
@@ -2175,7 +2186,7 @@ async function manejarAgendamientoCita(to, messageId) {
       return;
     }
 
-    await enviarMensajeAgendamientoConNavegacion(to, construirMensajeAreasAgendamiento(areas));
+    await enviarMensajeAgendamientoConNavegacionSeguro(to, construirMensajeAreasAgendamiento(areas), "seleccionando_area");
   } catch (error) {
     console.warn("[AGENDAMIENTO] No se pudieron cargar áreas de atención:", construirDetalleErrorLog(error, {
       action: "load_appointment_areas",
@@ -2191,6 +2202,130 @@ Estoy preparando tu cita paso a paso.
 Por ahora no pude cargar las áreas de atención disponibles. Por favor intenta nuevamente más tarde o vuelve al menú principal.`
     );
   }
+}
+
+async function manejarFlujoAgendamiento(from, text, messageId) {
+  const sesion = obtenerSesionAgendamiento(from);
+
+  if (!sesion) {
+    await enviarMenu(from, "pacientes");
+    return;
+  }
+
+  if (sesion.paso === "seleccionando_area") {
+    await manejarSeleccionAreaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
+  );
+}
+
+async function manejarSeleccionAreaAgendamiento(from, text, messageId, sesion) {
+  const indiceArea = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const areaSeleccionada = indiceArea === null ? null : sesion.areas?.[indiceArea];
+
+  if (!areaSeleccionada) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_area",
+      payload: {
+        reason: "invalid_appointment_area",
+        totalOptions: sesion.areas?.length || 0
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa opción 😅
+Por favor responde con un número de la lista.
+Ejemplo: 2`
+    );
+    return;
+  }
+
+  try {
+    const servicios = await obtenerServiciosAgendablesPorArea(areaSeleccionada.id);
+
+    sesionesAgendamiento.set(from, {
+      ...sesion,
+      paso: "seleccionando_servicio",
+      areaId: areaSeleccionada.id,
+      areaTitle: areaSeleccionada.title,
+      servicios,
+      timestamp: Date.now()
+    });
+
+    registrarEvento(from, "button_click", {
+      messageId,
+      flowKey: "agendamiento_area",
+      payload: {
+        action: "select_appointment_area",
+        selectedIndex: indiceArea,
+        areaId: areaSeleccionada.id,
+        areaTitle: areaSeleccionada.title
+      }
+    });
+
+    if (!servicios.length) {
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        `Área seleccionada: ${areaSeleccionada.title}
+
+En este momento no encontramos servicios activos para esta área. Puedes volver atrás para seleccionar otra área o regresar al menú principal.`
+      );
+      return;
+    }
+
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      from,
+      construirMensajeServiciosAgendamiento(areaSeleccionada.title, servicios),
+      "seleccionando_servicio"
+    );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudieron cargar servicios del área:", construirDetalleErrorLog(error, {
+      action: "load_appointment_services",
+      flowKey: "agendamiento_servicios",
+      areaId: areaSeleccionada.id
+    }));
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude cargar los servicios de esa área en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
+    );
+  }
+}
+
+async function volverAgendamiento(to, messageId) {
+  const sesion = obtenerSesionAgendamiento(to);
+
+  registrarEvento(to, "button_click", {
+    messageId,
+    buttonId: "agendamiento_volver",
+    flowKey: "agendamiento_citas",
+    payload: {
+      action: "appointment_back",
+      step: sesion?.paso || null
+    }
+  });
+
+  if (sesion?.paso === "seleccionando_servicio" && Array.isArray(sesion.areas) && sesion.areas.length) {
+    sesionesAgendamiento.set(to, {
+      ...sesion,
+      paso: "seleccionando_area",
+      areaId: null,
+      areaTitle: null,
+      servicios: [],
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacionSeguro(to, construirMensajeAreasAgendamiento(sesion.areas), "seleccionando_area");
+    return;
+  }
+
+  sesionesAgendamiento.delete(to);
+  await enviarMenu(to, "pacientes");
 }
 
 async function manejarRespuestaIA(from, text, messageId) {
@@ -4143,6 +4278,14 @@ function obtenerSesionCotizacion(from) {
   return sesionesCotizacion.get(from) || null;
 }
 
+function obtenerSesionAgendamiento(from) {
+  return sesionesAgendamiento.get(from) || null;
+}
+
+function estaEnFlujoAgendamiento(from) {
+  return Boolean(obtenerSesionAgendamiento(from));
+}
+
 function estaEsperandoAreaCotizacion(from) {
   return obtenerSesionCotizacion(from)?.paso === "esperando_area";
 }
@@ -4517,8 +4660,83 @@ Responde con el número del área.
 Ejemplo: 2`;
 }
 
+function construirMensajeServiciosAgendamiento(areaTitle, servicios) {
+  const listadoServicios = servicios
+    .map((servicio, index) => `${index + 1}. ${servicio.title}`)
+    .join("\n");
+
+  return `Área seleccionada: ${areaTitle}
+
+Ahora selecciona el servicio que deseas agendar:
+
+${listadoServicios}
+
+Responde con el número del servicio.
+Ejemplo: 1`;
+}
+
+function dividirMensajePorLineas(message, maxLength = 1200) {
+  const lineas = String(message || "").split("\n");
+  const partes = [];
+  let parteActual = "";
+
+  for (const linea of lineas) {
+    const candidato = parteActual ? `${parteActual}\n${linea}` : linea;
+
+    if (candidato.length <= maxLength) {
+      parteActual = candidato;
+      continue;
+    }
+
+    if (parteActual) {
+      partes.push(parteActual);
+    }
+
+    parteActual = linea;
+  }
+
+  if (parteActual) {
+    partes.push(parteActual);
+  }
+
+  return partes.length ? partes : [""];
+}
+
 async function enviarMensajeAgendamientoConNavegacion(to, message) {
   await enviarBotones(to, message, [botonVolverAgendamiento(), botonMenuPrincipal()]);
+}
+
+async function enviarMensajeAgendamientoConNavegacionSeguro(to, message, step = "agendamiento") {
+  const messageLength = String(message || "").length;
+  const buttons = [botonVolverAgendamiento(), botonMenuPrincipal()];
+  let partes = [message];
+
+  try {
+    if (messageLength <= 900) {
+      await enviarBotones(to, message, buttons);
+      return;
+    }
+
+    partes = dividirMensajePorLineas(message);
+
+    for (const parte of partes) {
+      await enviarMensajeTexto(to, parte);
+    }
+
+    await enviarBotones(
+      to,
+      "Responde con el número de la opción que deseas seleccionar o usa los botones de navegación.",
+      buttons
+    );
+  } catch (error) {
+    console.error("[AGENDAMIENTO] Error enviando mensaje con navegación:", construirDetalleErrorLog(error, {
+      action: "send_appointment_navigation_message",
+      messageLength,
+      parts: partes.length,
+      step
+    }));
+    throw error;
+  }
 }
 
 function extraerServiciosArea(area) {
