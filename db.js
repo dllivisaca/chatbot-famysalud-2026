@@ -250,6 +250,65 @@ async function ejecutarFeriadosQuery(sql, params = [], action = "feriados_query"
   }
 }
 
+async function obtenerCategoriasAgendables() {
+  if (!dbConfigurada()) {
+    return [];
+  }
+
+  const startedAt = Date.now();
+  let timeoutId;
+
+  try {
+    console.log("[AGENDAMIENTO_DB] Consultando categorias...", {
+      action: "appointment_categories_select",
+      table: "famysufk_appointments.categories"
+    });
+
+    const [rows] = await Promise.race([
+      ejecutarPoolConTimezone(
+        `SELECT id, title
+         FROM famysufk_appointments.categories
+         WHERE status = ?
+         ORDER BY title ASC
+         LIMIT 10`,
+        [1]
+      ),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
+        }, DB_QUERY_TIMEOUT_MS);
+      })
+    ]);
+
+    console.log("[AGENDAMIENTO_DB] Categorias consultadas:", {
+      action: "appointment_categories_select",
+      total: rows.length,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return rows
+      .map((row) => ({
+        id: row.id,
+        title: typeof row.title === "string" ? row.title.trim() : ""
+      }))
+      .filter((row) => row.title);
+  } catch (error) {
+    const detalleError = construirDetalleErrorDb(error, {
+      action: "appointment_categories_select",
+      table: "famysufk_appointments.categories",
+      elapsedMs: Date.now() - startedAt
+    });
+
+    console.warn("[AGENDAMIENTO_DB] Error consultando categorias:", detalleError);
+    console.error("[AGENDAMIENTO_DB] Error consultando categorias:", detalleError);
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function obtenerFeriadosPendientesRecordatorio(fechaFeriado) {
   if (!dbConfigurada()) {
     return [];
@@ -508,6 +567,7 @@ function columnaSessionIdNoExiste(error) {
 
 module.exports = {
   insertarEvento,
+  obtenerCategoriasAgendables,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
