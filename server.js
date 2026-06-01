@@ -13,6 +13,7 @@ const {
   insertarEvento,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
+  obtenerProfesionalesAgendablesPorServicio,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
@@ -2217,6 +2218,11 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "seleccionando_servicio") {
+    await manejarSeleccionServicioAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -2298,6 +2304,87 @@ En este momento no encontramos servicios activos para esta área. Puedes volver 
   }
 }
 
+async function manejarSeleccionServicioAgendamiento(from, text, messageId, sesion) {
+  const indiceServicio = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const servicioSeleccionado = indiceServicio === null ? null : sesion.servicios?.[indiceServicio];
+
+  if (!servicioSeleccionado) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_servicio",
+      payload: {
+        reason: "invalid_appointment_service",
+        totalOptions: sesion.servicios?.length || 0
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa opción 😅
+Por favor elige un número válido de la lista de servicios.
+Ejemplo: 1`
+    );
+    return;
+  }
+
+  try {
+    const profesionales = await obtenerProfesionalesAgendablesPorServicio(servicioSeleccionado.id);
+
+    sesionesAgendamiento.set(from, {
+      ...sesion,
+      paso: "seleccionando_profesional",
+      serviceId: servicioSeleccionado.id,
+      serviceTitle: servicioSeleccionado.title,
+      servicePrice: servicioSeleccionado.price,
+      salePrice: servicioSeleccionado.sale_price,
+      isPresential: servicioSeleccionado.is_presential,
+      isVirtual: servicioSeleccionado.is_virtual,
+      profesionales,
+      timestamp: Date.now()
+    });
+
+    registrarEvento(from, "button_click", {
+      messageId,
+      flowKey: "agendamiento_servicio",
+      payload: {
+        action: "select_appointment_service",
+        selectedIndex: indiceServicio,
+        areaId: sesion.areaId,
+        areaTitle: sesion.areaTitle,
+        serviceId: servicioSeleccionado.id,
+        serviceTitle: servicioSeleccionado.title
+      }
+    });
+
+    if (!profesionales.length) {
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        `Servicio seleccionado: ${servicioSeleccionado.title}
+
+Por ahora no encontramos profesionales con horarios configurados para este servicio. Puedes volver atrás para seleccionar otro servicio o regresar al menú principal.`
+      );
+      return;
+    }
+
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      from,
+      construirMensajeProfesionalesAgendamiento(servicioSeleccionado.title, profesionales),
+      "seleccionando_profesional"
+    );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudieron cargar profesionales del servicio:", construirDetalleErrorLog(error, {
+      action: "load_appointment_professionals",
+      flowKey: "agendamiento_profesionales",
+      serviceId: servicioSeleccionado.id
+    }));
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude cargar los profesionales de ese servicio en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
+    );
+  }
+}
+
 async function volverAgendamiento(to, messageId) {
   const sesion = obtenerSesionAgendamiento(to);
 
@@ -2310,6 +2397,27 @@ async function volverAgendamiento(to, messageId) {
       step: sesion?.paso || null
     }
   });
+
+  if (sesion?.paso === "seleccionando_profesional" && Array.isArray(sesion.servicios) && sesion.servicios.length) {
+    sesionesAgendamiento.set(to, {
+      ...sesion,
+      paso: "seleccionando_servicio",
+      serviceId: null,
+      serviceTitle: null,
+      servicePrice: null,
+      salePrice: null,
+      isPresential: null,
+      isVirtual: null,
+      profesionales: [],
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeServiciosAgendamiento(sesion.areaTitle, sesion.servicios),
+      "seleccionando_servicio"
+    );
+    return;
+  }
 
   if (sesion?.paso === "seleccionando_servicio" && Array.isArray(sesion.areas) && sesion.areas.length) {
     sesionesAgendamiento.set(to, {
@@ -4672,6 +4780,21 @@ Ahora selecciona el servicio que deseas agendar:
 ${listadoServicios}
 
 Responde con el número del servicio.
+Ejemplo: 1`;
+}
+
+function construirMensajeProfesionalesAgendamiento(serviceTitle, profesionales) {
+  const listadoProfesionales = profesionales
+    .map((profesional, index) => `${index + 1}. ${profesional.name}`)
+    .join("\n");
+
+  return `Servicio seleccionado: ${serviceTitle}
+
+Ahora selecciona el profesional con quien deseas agendar:
+
+${listadoProfesionales}
+
+Responde con el número del profesional.
 Ejemplo: 1`;
 }
 

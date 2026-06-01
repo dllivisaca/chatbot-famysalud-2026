@@ -379,6 +379,81 @@ async function obtenerServiciosAgendablesPorArea(areaId) {
   }
 }
 
+async function obtenerProfesionalesAgendablesPorServicio(serviceId) {
+  if (!dbConfigurada()) {
+    return [];
+  }
+
+  const startedAt = Date.now();
+  let timeoutId;
+
+  try {
+    console.log("[AGENDAMIENTO_DB] Consultando profesionales por servicio...", {
+      action: "appointment_professionals_by_service_select",
+      table: "famysufk_appointments.employees/famysufk_appointments.employee_service/famysufk_appointments.users",
+      serviceId
+    });
+
+    const [rows] = await Promise.race([
+      ejecutarPoolConTimezone(
+        `SELECT
+           e.id,
+           u.name,
+           e.days,
+           es.slot_duration
+         FROM famysufk_appointments.employees e
+         INNER JOIN famysufk_appointments.employee_service es
+           ON es.employee_id = e.id
+         INNER JOIN famysufk_appointments.users u
+           ON u.id = e.user_id
+         WHERE es.service_id = ?
+           AND u.status = ?
+           AND e.days IS NOT NULL
+           AND e.days <> ''
+           AND e.days <> '[]'
+         ORDER BY u.name ASC`,
+        [serviceId, 1]
+      ),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
+        }, DB_QUERY_TIMEOUT_MS);
+      })
+    ]);
+
+    console.log("[AGENDAMIENTO_DB] Profesionales por servicio consultados:", {
+      action: "appointment_professionals_by_service_select",
+      serviceId,
+      total: rows.length,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return rows
+      .map((row) => ({
+        id: row.id,
+        name: typeof row.name === "string" ? row.name.trim() : "",
+        days: row.days,
+        slot_duration: row.slot_duration
+      }))
+      .filter((row) => row.name);
+  } catch (error) {
+    const detalleError = construirDetalleErrorDb(error, {
+      action: "appointment_professionals_by_service_select",
+      table: "famysufk_appointments.employees/famysufk_appointments.employee_service/famysufk_appointments.users",
+      serviceId,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    console.warn("[AGENDAMIENTO_DB] Error consultando profesionales por servicio:", detalleError);
+    console.error("[AGENDAMIENTO_DB] Error consultando profesionales por servicio:", detalleError);
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function obtenerFeriadosPendientesRecordatorio(fechaFeriado) {
   if (!dbConfigurada()) {
     return [];
@@ -639,6 +714,7 @@ module.exports = {
   insertarEvento,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
+  obtenerProfesionalesAgendablesPorServicio,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
