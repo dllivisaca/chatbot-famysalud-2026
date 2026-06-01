@@ -2223,6 +2223,16 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "seleccionando_profesional") {
+    await manejarSeleccionProfesionalAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "seleccionando_modalidad") {
+    await manejarSeleccionModalidadAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -2385,6 +2395,152 @@ Por ahora no encontramos profesionales con horarios configurados para este servi
   }
 }
 
+async function manejarSeleccionProfesionalAgendamiento(from, text, messageId, sesion) {
+  const indiceProfesional = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const profesionalSeleccionado = indiceProfesional === null ? null : sesion.profesionales?.[indiceProfesional];
+
+  if (!profesionalSeleccionado) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_profesional",
+      payload: {
+        reason: "invalid_appointment_professional",
+        totalOptions: sesion.profesionales?.length || 0
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa opción 😅
+Por favor elige un número válido de la lista de profesionales.
+Ejemplo: 1`
+    );
+    return;
+  }
+
+  const modalidades = obtenerModalidadesServicio(sesion);
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    flowKey: "agendamiento_profesional",
+    payload: {
+      action: "select_appointment_professional",
+      selectedIndex: indiceProfesional,
+      professionalId: profesionalSeleccionado.id,
+      professionalName: profesionalSeleccionado.name,
+      serviceId: sesion.serviceId,
+      serviceTitle: sesion.serviceTitle
+    }
+  });
+
+  if (modalidades.length === 2) {
+    sesionesAgendamiento.set(from, {
+      ...sesion,
+      paso: "seleccionando_modalidad",
+      professionalId: profesionalSeleccionado.id,
+      professionalName: profesionalSeleccionado.name,
+      modalidades,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeModalidadesAgendamiento(profesionalSeleccionado.name)
+    );
+    return;
+  }
+
+  if (modalidades.length === 1) {
+    const modalidad = modalidades[0];
+
+    sesionesAgendamiento.set(from, {
+      ...sesion,
+      paso: "seleccionando_fecha",
+      professionalId: profesionalSeleccionado.id,
+      professionalName: profesionalSeleccionado.name,
+      modalidades,
+      appointmentMode: modalidad.value,
+      modalidadSeleccionUnica: true,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `Profesional seleccionado: ${profesionalSeleccionado.name}
+
+Modalidad disponible: ${modalidad.label}
+
+Continuemos con la fecha.`
+    );
+    return;
+  }
+
+  sesionesAgendamiento.set(from, {
+    ...sesion,
+    professionalId: profesionalSeleccionado.id,
+    professionalName: profesionalSeleccionado.name,
+    modalidades: [],
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    `Profesional seleccionado: ${profesionalSeleccionado.name}
+
+Por ahora este servicio no tiene modalidad disponible para agendar por WhatsApp. Puedes volver atrás para elegir otro profesional o regresar al menú principal.`
+  );
+}
+
+async function manejarSeleccionModalidadAgendamiento(from, text, messageId, sesion) {
+  const indiceModalidad = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const modalidadSeleccionada = indiceModalidad === null ? null : sesion.modalidades?.[indiceModalidad];
+
+  if (!modalidadSeleccionada) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_modalidad",
+      payload: {
+        reason: "invalid_appointment_mode",
+        totalOptions: sesion.modalidades?.length || 0
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa modalidad 😅
+Por favor responde con 1 para Presencial o 2 para Virtual.`
+    );
+    return;
+  }
+
+  sesionesAgendamiento.set(from, {
+    ...sesion,
+    paso: "seleccionando_fecha",
+    appointmentMode: modalidadSeleccionada.value,
+    modalidadSeleccionUnica: false,
+    timestamp: Date.now()
+  });
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    flowKey: "agendamiento_modalidad",
+    payload: {
+      action: "select_appointment_mode",
+      selectedIndex: indiceModalidad,
+      appointmentMode: modalidadSeleccionada.value,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    }
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    `Modalidad seleccionada: ${modalidadSeleccionada.label}
+
+Ahora continuaremos con la selección de fecha.`
+  );
+}
+
 async function volverAgendamiento(to, messageId) {
   const sesion = obtenerSesionAgendamiento(to);
 
@@ -2397,6 +2553,58 @@ async function volverAgendamiento(to, messageId) {
       step: sesion?.paso || null
     }
   });
+
+  if (sesion?.paso === "seleccionando_fecha") {
+    if (!sesion.modalidadSeleccionUnica && Array.isArray(sesion.modalidades) && sesion.modalidades.length > 1) {
+      sesionesAgendamiento.set(to, {
+        ...sesion,
+        paso: "seleccionando_modalidad",
+        appointmentMode: null,
+        timestamp: Date.now()
+      });
+      await enviarMensajeAgendamientoConNavegacion(
+        to,
+        construirMensajeModalidadesAgendamiento(sesion.professionalName)
+      );
+      return;
+    }
+
+    if (Array.isArray(sesion.profesionales) && sesion.profesionales.length) {
+      sesionesAgendamiento.set(to, {
+        ...sesion,
+        paso: "seleccionando_profesional",
+        professionalId: null,
+        professionalName: null,
+        appointmentMode: null,
+        modalidadSeleccionUnica: null,
+        timestamp: Date.now()
+      });
+      await enviarMensajeAgendamientoConNavegacionSeguro(
+        to,
+        construirMensajeProfesionalesAgendamiento(sesion.serviceTitle, sesion.profesionales),
+        "seleccionando_profesional"
+      );
+      return;
+    }
+  }
+
+  if (sesion?.paso === "seleccionando_modalidad" && Array.isArray(sesion.profesionales) && sesion.profesionales.length) {
+    sesionesAgendamiento.set(to, {
+      ...sesion,
+      paso: "seleccionando_profesional",
+      professionalId: null,
+      professionalName: null,
+      appointmentMode: null,
+      modalidades: [],
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeProfesionalesAgendamiento(sesion.serviceTitle, sesion.profesionales),
+      "seleccionando_profesional"
+    );
+    return;
+  }
 
   if (sesion?.paso === "seleccionando_profesional" && Array.isArray(sesion.servicios) && sesion.servicios.length) {
     sesionesAgendamiento.set(to, {
@@ -4795,6 +5003,32 @@ Ahora selecciona el profesional con quien deseas agendar:
 ${listadoProfesionales}
 
 Responde con el número del profesional.
+Ejemplo: 1`;
+}
+
+function obtenerModalidadesServicio(sesion) {
+  const modalidades = [];
+
+  if (sesion.isPresential) {
+    modalidades.push({ value: "presencial", label: "Presencial" });
+  }
+
+  if (sesion.isVirtual) {
+    modalidades.push({ value: "virtual", label: "Virtual" });
+  }
+
+  return modalidades;
+}
+
+function construirMensajeModalidadesAgendamiento(professionalName) {
+  return `Profesional seleccionado: ${professionalName}
+
+Selecciona la modalidad de atención:
+
+1. Presencial
+2. Virtual
+
+Responde con el número de la modalidad.
 Ejemplo: 1`;
 }
 
