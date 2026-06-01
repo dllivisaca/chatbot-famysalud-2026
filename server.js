@@ -39,7 +39,10 @@ const CHATBOT_CATALOG_PATH = process.env.CHATBOT_CATALOG_PATH;
 const EVENT_HASH_SALT = process.env.EVENT_HASH_SALT || "";
 const APP_ENV = process.env.APP_ENV || "production";
 const ENABLE_APPOINTMENT_BOOKING = flagActiva(process.env.ENABLE_APPOINTMENT_BOOKING);
-const APPOINTMENT_TEST_PHONE = "+593990043768";
+const APPOINTMENT_ALLOWED_PHONES = (process.env.APPOINTMENT_ALLOWED_PHONES || "0990043768,+593990043768")
+  .split(",")
+  .map(normalizarNumeroWhatsApp)
+  .filter(Boolean);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
 const INTERNAL_NOTIFICATION_EMAIL = process.env.INTERNAL_NOTIFICATION_EMAIL || process.env.RESULTS_INTERNAL_EMAIL;
 const INTERNAL_EMAIL_FROM = process.env.INTERNAL_EMAIL_FROM || process.env.RESULTS_EMAIL_FROM;
@@ -143,7 +146,7 @@ function normalizarNumeroWhatsApp(numero) {
 
 function puedeUsarAgendamiento(numeroUsuario) {
   return featureHabilitada(ENABLE_APPOINTMENT_BOOKING)
-    && normalizarNumeroWhatsApp(numeroUsuario) === normalizarNumeroWhatsApp(APPOINTMENT_TEST_PHONE);
+    && APPOINTMENT_ALLOWED_PHONES.includes(normalizarNumeroWhatsApp(numeroUsuario));
 }
 
 function esNumeroInterno(numero) {
