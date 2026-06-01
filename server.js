@@ -2084,7 +2084,7 @@ async function manejarBoton(to, buttonId, messageId) {
           allowed: false
         }
       });
-      await enviarMenu(to, "pacientes");
+      await enviarMensajeTexto(to, accion.text);
       return;
     }
 
@@ -4889,7 +4889,13 @@ async function enviarMenu(to, menuKey) {
     return;
   }
 
-  console.log("[MENU] Enviando:", menuKey);
+  console.log("[MENU] Enviando:", {
+    menuKey,
+    buttons: menu.buttons.map((button) => ({
+      id: button.reply?.id,
+      title: button.reply?.title
+    }))
+  });
   await enviarBotones(to, menu.text, menu.buttons);
   registrarEvento(to, "menu_opened", { menuKey });
 }
@@ -4901,17 +4907,18 @@ function obtenerMenuDisponible(menuKey, numeroUsuario) {
     return null;
   }
 
-  if (menuKey !== "pacientes" || puedeUsarAgendamiento(numeroUsuario)) {
-    return menu;
-  }
-
-  return {
-    ...menu,
-    buttons: menu.buttons.filter((button) => button.reply?.id !== "paciente_agendar_cita")
-  };
+  return menu;
 }
 
 async function enviarBotones(to, bodyText, buttons) {
+  console.log("[WHATSAPP_BUTTONS] Botones finales:", {
+    to,
+    buttons: buttons.map((button) => ({
+      id: button.reply?.id,
+      title: button.reply?.title
+    }))
+  });
+
   const payload = {
     messaging_product: "whatsapp",
     to,
