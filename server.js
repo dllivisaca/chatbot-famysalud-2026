@@ -11,7 +11,7 @@ const path = require("path");
 const nodemailer = require("nodemailer");
 const {
   insertarEvento,
-  obtenerCategoriasAgendables,
+  obtenerAreasAgendables,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
@@ -431,6 +431,7 @@ const ACCIONES_BOTONES = {
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text_with_main_menu", text: TEXTOS.trabaja },
   volver_cotizar: { type: "restart_quote" },
+  agendamiento_volver: { type: "menu", menu: "pacientes" },
 
   paciente_agendar_cita: { type: "appointment_booking", text: `¡Perfecto! 💙
 
@@ -2141,8 +2142,8 @@ async function manejarAgendamientoCita(to, messageId) {
   sesionesResultadosEmpresas.delete(to);
   sesionesAgendamiento.set(to, {
     ...sesionActual,
-    paso: "seleccionando_categoria",
-    categorias: [],
+    paso: "seleccionando_area",
+    areas: [],
     timestamp: Date.now()
   });
 
@@ -2153,46 +2154,41 @@ async function manejarAgendamientoCita(to, messageId) {
     payload: {
       actionType: accion.type,
       enabled: true,
-      step: "seleccionando_categoria"
+      step: "seleccionando_area"
     }
   });
 
   try {
-    const categorias = await obtenerCategoriasAgendables();
+    const areas = await obtenerAreasAgendables();
 
     sesionesAgendamiento.set(to, {
       ...sesionesAgendamiento.get(to),
-      categorias,
+      areas,
       timestamp: Date.now()
     });
 
-    if (!categorias.length) {
-      await enviarMensajeConMenuPrincipal(
+    if (!areas.length) {
+      await enviarMensajeAgendamientoConNavegacion(
         to,
-        "En este momento no encontramos categorias disponibles para agendar por WhatsApp. Por favor intenta mas tarde o comunicate con un asesor de FamySALUD."
+        "En este momento no encontramos áreas de atención disponibles para agendar por WhatsApp. Por favor intenta más tarde o comunícate con un asesor de FamySALUD."
       );
       return;
     }
 
-    if (puedeUsarListaWhatsApp(categorias)) {
-      await enviarListaCategoriasAgendamiento(to, categorias);
-      return;
-    }
-
-    await enviarMensajeConMenuPrincipal(to, construirMensajeCategoriasAgendamiento(categorias));
+    await enviarMensajeAgendamientoConNavegacion(to, construirMensajeAreasAgendamiento(areas));
   } catch (error) {
-    console.warn("[AGENDAMIENTO] No se pudieron cargar categorias:", construirDetalleErrorLog(error, {
-      action: "load_appointment_categories",
+    console.warn("[AGENDAMIENTO] No se pudieron cargar áreas de atención:", construirDetalleErrorLog(error, {
+      action: "load_appointment_areas",
       flowKey: "agendamiento_citas"
     }));
 
-    await enviarMensajeConMenuPrincipal(
+    await enviarMensajeAgendamientoConNavegacion(
       to,
       `🩺 Bienvenida al agendamiento de citas de FamySALUD.
 
 Estoy preparando tu cita paso a paso.
 
-Por ahora no pude cargar las categorias disponibles. Por favor intenta nuevamente mas tarde o vuelve al menu principal.`
+Por ahora no pude cargar las áreas de atención disponibles. Por favor intenta nuevamente más tarde o vuelve al menú principal.`
     );
   }
 }
@@ -4197,6 +4193,10 @@ function botonVolverCotizar() {
   return boton("volver_cotizar", "Volver a cotizar");
 }
 
+function botonVolverAgendamiento() {
+  return boton("agendamiento_volver", "⬅️ Volver atrás");
+}
+
 function catalogoServiciosValido(catalogo) {
   return Boolean(catalogo && typeof catalogo === "object" && Array.isArray(catalogo.areas));
 }
@@ -4504,42 +4504,21 @@ function truncarTextoLista(text) {
   return valor.slice(0, MAX_TITULO_FILA_LISTA - 1).trimEnd();
 }
 
-function construirIdListaAgendamiento(tipo, index) {
-  return `ag_${tipo}_${index}`;
-}
-
-function construirMensajeCategoriasAgendamiento(categorias) {
-  const listadoCategorias = categorias
-    .map((categoria, index) => `${index + 1}. ${categoria.title}`)
+function construirMensajeAreasAgendamiento(areas) {
+  const listadoAreas = areas
+    .map((area, index) => `${index + 1}. ${area.title}`)
     .join("\n");
 
-  return `Estas son las categorias disponibles para agendar:
+  return `Selecciona el área de atención que deseas agendar:
 
-${listadoCategorias}
+${listadoAreas}
 
-Responde con el numero de la categoria que deseas consultar.`;
+Responde con el número del área.
+Ejemplo: 2`;
 }
 
-async function enviarListaCategoriasAgendamiento(to, categorias) {
-  const rows = categorias.map((categoria, index) => ({
-    id: construirIdListaAgendamiento("categoria", index),
-    title: truncarTextoLista(categoria.title)
-  }));
-
-  await enviarListaWhatsApp(to, "Selecciona la categoria que deseas agendar:", "Ver categorias", [
-    {
-      title: "Categorias",
-      rows
-    }
-  ]);
-
-  registrarEvento(to, "menu_opened", {
-    flowKey: "agendamiento_categoria",
-    payload: {
-      interactionType: "list",
-      totalOptions: categorias.length
-    }
-  });
+async function enviarMensajeAgendamientoConNavegacion(to, message) {
+  await enviarBotones(to, message, [botonVolverAgendamiento(), botonMenuPrincipal()]);
 }
 
 function extraerServiciosArea(area) {

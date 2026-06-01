@@ -250,7 +250,7 @@ async function ejecutarFeriadosQuery(sql, params = [], action = "feriados_query"
   }
 }
 
-async function obtenerCategoriasAgendables() {
+async function obtenerAreasAgendables() {
   if (!dbConfigurada()) {
     return [];
   }
@@ -259,8 +259,8 @@ async function obtenerCategoriasAgendables() {
   let timeoutId;
 
   try {
-    console.log("[AGENDAMIENTO_DB] Consultando categorias...", {
-      action: "appointment_categories_select",
+    console.log("[AGENDAMIENTO_DB] Consultando áreas de atención...", {
+      action: "appointment_areas_select",
       table: "famysufk_appointments.categories"
     });
 
@@ -269,8 +269,7 @@ async function obtenerCategoriasAgendables() {
         `SELECT id, title
          FROM famysufk_appointments.categories
          WHERE status = ?
-         ORDER BY title ASC
-         LIMIT 10`,
+         ORDER BY title ASC`,
         [1]
       ),
       new Promise((_, reject) => {
@@ -280,8 +279,8 @@ async function obtenerCategoriasAgendables() {
       })
     ]);
 
-    console.log("[AGENDAMIENTO_DB] Categorias consultadas:", {
-      action: "appointment_categories_select",
+    console.log("[AGENDAMIENTO_DB] Áreas de atención consultadas:", {
+      action: "appointment_areas_select",
       total: rows.length,
       elapsedMs: Date.now() - startedAt
     });
@@ -294,13 +293,13 @@ async function obtenerCategoriasAgendables() {
       .filter((row) => row.title);
   } catch (error) {
     const detalleError = construirDetalleErrorDb(error, {
-      action: "appointment_categories_select",
+      action: "appointment_areas_select",
       table: "famysufk_appointments.categories",
       elapsedMs: Date.now() - startedAt
     });
 
-    console.warn("[AGENDAMIENTO_DB] Error consultando categorias:", detalleError);
-    console.error("[AGENDAMIENTO_DB] Error consultando categorias:", detalleError);
+    console.warn("[AGENDAMIENTO_DB] Error consultando áreas de atención:", detalleError);
+    console.error("[AGENDAMIENTO_DB] Error consultando áreas de atención:", detalleError);
     throw error;
   } finally {
     if (timeoutId) {
@@ -567,7 +566,7 @@ function columnaSessionIdNoExiste(error) {
 
 module.exports = {
   insertarEvento,
-  obtenerCategoriasAgendables,
+  obtenerAreasAgendables,
   guardarPacienteEnColaAsesor,
   eliminarPacienteDeColaAsesor,
   guardarSesionAsesorPersistida,
