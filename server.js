@@ -2087,7 +2087,7 @@ async function manejarBoton(to, buttonId, messageId) {
           allowed: false
         }
       });
-      await enviarMensajeTexto(to, accion.text);
+      await enviarMensajeConMenuPrincipal(to, accion.text);
       return;
     }
 
@@ -2144,7 +2144,20 @@ async function manejarAgendamientoCita(to, messageId) {
     }
   });
 
-  await enviarMensajeConMenuPrincipal(to, accion.text);
+  await enviarMensajeConMenuPrincipal(
+    to,
+    `🩺 Bienvenida al agendamiento de citas de FamySALUD.
+
+Estoy preparando tu cita paso a paso.
+
+Próximamente podrás seleccionar:
+• Especialidad
+• Profesional
+• Fecha
+• Horario
+
+🚧 Fase 2 en construcción.`
+  );
 }
 
 async function manejarRespuestaIA(from, text, messageId) {
