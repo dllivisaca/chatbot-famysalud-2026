@@ -260,17 +260,21 @@ async function obtenerAreasAgendables() {
 
   try {
     console.log("[AGENDAMIENTO_DB] Consultando áreas de atención...", {
-      action: "appointment_areas_select",
-      table: "famysufk_appointments.categories"
+      action: "appointment_areas_with_services_select",
+      table: "famysufk_appointments.categories/famysufk_appointments.services"
     });
 
     const [rows] = await Promise.race([
       ejecutarPoolConTimezone(
-        `SELECT id, title
-         FROM famysufk_appointments.categories
-         WHERE status = ?
-         ORDER BY title ASC`,
-        [1]
+        `SELECT DISTINCT c.id, c.title
+         FROM famysufk_appointments.categories c
+         INNER JOIN famysufk_appointments.services s
+           ON s.category_id = c.id
+         WHERE c.status = ?
+           AND s.status = ?
+           AND s.deleted_at IS NULL
+         ORDER BY c.title ASC`,
+        [1, 1]
       ),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
@@ -280,7 +284,7 @@ async function obtenerAreasAgendables() {
     ]);
 
     console.log("[AGENDAMIENTO_DB] Áreas de atención consultadas:", {
-      action: "appointment_areas_select",
+      action: "appointment_areas_with_services_select",
       total: rows.length,
       elapsedMs: Date.now() - startedAt
     });
@@ -293,8 +297,8 @@ async function obtenerAreasAgendables() {
       .filter((row) => row.title);
   } catch (error) {
     const detalleError = construirDetalleErrorDb(error, {
-      action: "appointment_areas_select",
-      table: "famysufk_appointments.categories",
+      action: "appointment_areas_with_services_select",
+      table: "famysufk_appointments.categories/famysufk_appointments.services",
       elapsedMs: Date.now() - startedAt
     });
 
