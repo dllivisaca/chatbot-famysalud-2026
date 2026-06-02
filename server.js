@@ -2525,6 +2525,10 @@ Ejemplo: 1`
     };
 
     guardarSesionAgendamiento(from, nuevaSesion);
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeModalidadUnicaAgendamiento(profesionalSeleccionado.name, modalidad.label)
+    );
     await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
     return;
   }
@@ -2541,7 +2545,7 @@ Ejemplo: 1`
     from,
     `Profesional seleccionado: ${profesionalSeleccionado.name}
 
-Por ahora este servicio no tiene modalidad disponible para agendar por WhatsApp. Puedes volver atrás para elegir otro profesional o regresar al menú principal.`
+No pude determinar la modalidad disponible para este servicio. Puedes volver atrás para elegir otro profesional o regresar al menú principal.`
   );
 }
 
@@ -5266,6 +5270,12 @@ Selecciona la modalidad de atención:
 
 Responde con el número de la modalidad.
 Ejemplo: 1`;
+}
+
+function construirMensajeModalidadUnicaAgendamiento(professionalName, modalidadLabel) {
+  return `Profesional seleccionado: ${professionalName}
+
+Modalidad disponible: ${modalidadLabel}`;
 }
 
 async function iniciarSeleccionFechaAgendamiento(to, sesion) {

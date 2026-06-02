@@ -48,6 +48,22 @@ function construirDetalleErrorDb(error, contexto = {}) {
   };
 }
 
+function normalizarBooleanoBD(valor) {
+  if (typeof valor === "boolean") {
+    return valor;
+  }
+
+  if (typeof valor === "number") {
+    return valor === 1;
+  }
+
+  if (typeof valor === "string") {
+    return ["1", "true", "si", "sí", "yes"].includes(valor.trim().toLowerCase());
+  }
+
+  return false;
+}
+
 async function insertarEvento(evento) {
   if (!dbConfigurada()) {
     return;
@@ -420,8 +436,8 @@ async function obtenerServiciosAgendablesPorArea(areaId) {
         title: typeof row.title === "string" ? row.title.trim() : "",
         price: row.price,
         sale_price: row.sale_price,
-        is_presential: Boolean(row.is_presential),
-        is_virtual: Boolean(row.is_virtual)
+        is_presential: normalizarBooleanoBD(row.is_presential),
+        is_virtual: normalizarBooleanoBD(row.is_virtual)
       }))
       .filter((row) => row.title);
   } catch (error) {
