@@ -19,6 +19,9 @@ const {
   guardarSesionAsesorPersistida,
   finalizarSesionAsesorPersistida,
   obtenerEstadoAsesoresPersistido,
+  guardarSesionAgendamientoPersistida,
+  eliminarSesionAgendamientoPersistida,
+  obtenerSesionesAgendamientoPersistidas,
   obtenerFeriadosPendientesRecordatorio,
   marcarRecordatorioFeriadoEnviado,
   obtenerConfirmacionFeriadoPendiente,
@@ -118,6 +121,7 @@ const colaEsperaAsesor = [];
 const temporizadoresSesionAsesor = new Map();
 const temporizadoresAceptacionAsesor = new Map();
 const persistenciasAsesorPendientes = new Map();
+const persistenciasAgendamientoPendientes = new Map();
 const NUMEROS_INTERNOS = [
   ...ASESORES_WHATSAPP.map((asesor) => asesor.phone)
 ];
@@ -807,6 +811,51 @@ function guardarSesionAsesor(asesorId, sesion) {
   persistirSesionAsesorSeguro(sesion);
   reiniciarTemporizadorAceptacionAsesor(asesorId);
   return sesion;
+}
+
+function encolarPersistenciaAgendamiento(phone, action, task) {
+  const anterior = persistenciasAgendamientoPendientes.get(phone) || Promise.resolve();
+  const startedAt = Date.now();
+  const siguiente = anterior
+    .catch(() => {})
+    .then(task)
+    .catch((error) => {
+      console.warn(`[AGENDAMIENTO_DB] ${action}. Continuando en memoria:`, construirDetalleErrorLog(error, {
+        action,
+        elapsedMs: Date.now() - startedAt
+      }));
+    })
+    .finally(() => {
+      if (persistenciasAgendamientoPendientes.get(phone) === siguiente) {
+        persistenciasAgendamientoPendientes.delete(phone);
+      }
+    });
+
+  persistenciasAgendamientoPendientes.set(phone, siguiente);
+}
+
+function guardarSesionAgendamiento(phone, sesion) {
+  const sesionPersistible = {
+    ...sesion,
+    timestamp: sesion?.timestamp || Date.now()
+  };
+
+  sesionesAgendamiento.set(phone, sesionPersistible);
+  encolarPersistenciaAgendamiento(
+    phone,
+    "No se pudo persistir sesion de agendamiento",
+    () => guardarSesionAgendamientoPersistida(phone, obtenerSessionId(phone), sesionPersistible, SESION_USUARIO_TTL_MS)
+  );
+  return sesionPersistible;
+}
+
+function eliminarSesionAgendamiento(phone) {
+  sesionesAgendamiento.delete(phone);
+  encolarPersistenciaAgendamiento(
+    phone,
+    "No se pudo eliminar sesion de agendamiento",
+    () => eliminarSesionAgendamientoPersistida(phone)
+  );
 }
 
 function obtenerSesionAsesorPorTelefono(phone) {
@@ -2154,7 +2203,7 @@ async function manejarAgendamientoCita(to, messageId) {
   sesionesCotizacion.delete(to);
   sesionesResultados.delete(to);
   sesionesResultadosEmpresas.delete(to);
-  sesionesAgendamiento.set(to, {
+  guardarSesionAgendamiento(to, {
     ...sesionActual,
     paso: "seleccionando_area",
     areas: [],
@@ -2175,7 +2224,7 @@ async function manejarAgendamientoCita(to, messageId) {
   try {
     const areas = await obtenerAreasAgendables();
 
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesionesAgendamiento.get(to),
       areas,
       timestamp: Date.now()
@@ -2277,7 +2326,7 @@ Ejemplo: 2`
   try {
     const servicios = await obtenerServiciosAgendablesPorArea(areaSeleccionada.id);
 
-    sesionesAgendamiento.set(from, {
+    guardarSesionAgendamiento(from, {
       ...sesion,
       paso: "seleccionando_servicio",
       areaId: areaSeleccionada.id,
@@ -2352,7 +2401,7 @@ Ejemplo: 1`
   try {
     const profesionales = await obtenerProfesionalesAgendablesPorServicio(servicioSeleccionado.id);
 
-    sesionesAgendamiento.set(from, {
+    guardarSesionAgendamiento(from, {
       ...sesion,
       paso: "seleccionando_profesional",
       serviceId: servicioSeleccionado.id,
@@ -2446,7 +2495,7 @@ Ejemplo: 1`
   });
 
   if (modalidades.length === 2) {
-    sesionesAgendamiento.set(from, {
+    guardarSesionAgendamiento(from, {
       ...sesion,
       paso: "seleccionando_modalidad",
       professionalId: profesionalSeleccionado.id,
@@ -2475,12 +2524,12 @@ Ejemplo: 1`
       timestamp: Date.now()
     };
 
-    sesionesAgendamiento.set(from, nuevaSesion);
+    guardarSesionAgendamiento(from, nuevaSesion);
     await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
     return;
   }
 
-  sesionesAgendamiento.set(from, {
+  guardarSesionAgendamiento(from, {
     ...sesion,
     professionalId: profesionalSeleccionado.id,
     professionalName: profesionalSeleccionado.name,
@@ -2526,7 +2575,7 @@ Por favor responde con 1 para Presencial o 2 para Virtual.`
     timestamp: Date.now()
   };
 
-  sesionesAgendamiento.set(from, nuevaSesion);
+  guardarSesionAgendamiento(from, nuevaSesion);
 
   registrarEvento(from, "button_click", {
     messageId,
@@ -2573,7 +2622,7 @@ Ejemplo: 1`
     timestamp: Date.now()
   };
 
-  sesionesAgendamiento.set(from, sesionConFecha);
+  guardarSesionAgendamiento(from, sesionConFecha);
 
   registrarEvento(from, "button_click", {
     messageId,
@@ -2594,7 +2643,7 @@ async function iniciarSeleccionHorarioAgendamiento(to, sesion) {
   try {
     const horariosDisponibles = await consultarHorariosDisponiblesAgendamiento(sesion);
 
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesionesAgendamiento.get(to),
       paso: "seleccionando_horario",
       horariosDisponibles,
@@ -2655,7 +2704,7 @@ Ejemplo: 1`
     return;
   }
 
-  sesionesAgendamiento.set(from, {
+  guardarSesionAgendamiento(from, {
     ...sesion,
     paso: "confirmando_turno",
     appointmentTime: horarioSeleccionado.start,
@@ -2703,7 +2752,7 @@ async function volverAgendamiento(to, messageId) {
 
   if (sesion?.paso === "seleccionando_fecha") {
     if (!sesion.modalidadSeleccionUnica && Array.isArray(sesion.modalidades) && sesion.modalidades.length > 1) {
-      sesionesAgendamiento.set(to, {
+      guardarSesionAgendamiento(to, {
         ...sesion,
         paso: "seleccionando_modalidad",
         appointmentMode: null,
@@ -2717,7 +2766,7 @@ async function volverAgendamiento(to, messageId) {
     }
 
     if (Array.isArray(sesion.profesionales) && sesion.profesionales.length) {
-      sesionesAgendamiento.set(to, {
+      guardarSesionAgendamiento(to, {
         ...sesion,
         paso: "seleccionando_profesional",
         professionalId: null,
@@ -2738,7 +2787,7 @@ async function volverAgendamiento(to, messageId) {
   if ((sesion?.paso === "seleccionando_horario" || sesion?.paso === "confirmando_turno")
     && Array.isArray(sesion.fechasDisponibles)
     && sesion.fechasDisponibles.length) {
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "seleccionando_fecha",
       appointmentDate: null,
@@ -2758,7 +2807,7 @@ async function volverAgendamiento(to, messageId) {
   }
 
   if (sesion?.paso === "seleccionando_modalidad" && Array.isArray(sesion.profesionales) && sesion.profesionales.length) {
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "seleccionando_profesional",
       professionalId: null,
@@ -2776,7 +2825,7 @@ async function volverAgendamiento(to, messageId) {
   }
 
   if (sesion?.paso === "seleccionando_profesional" && Array.isArray(sesion.servicios) && sesion.servicios.length) {
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "seleccionando_servicio",
       serviceId: null,
@@ -2797,7 +2846,7 @@ async function volverAgendamiento(to, messageId) {
   }
 
   if (sesion?.paso === "seleccionando_servicio" && Array.isArray(sesion.areas) && sesion.areas.length) {
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "seleccionando_area",
       areaId: null,
@@ -2809,7 +2858,7 @@ async function volverAgendamiento(to, messageId) {
     return;
   }
 
-  sesionesAgendamiento.delete(to);
+  eliminarSesionAgendamiento(to);
   await enviarMenu(to, "pacientes");
 }
 
@@ -4637,12 +4686,20 @@ function actualizarSesionUsuario(from, opciones = {}) {
   });
   sesionesExpiradas.delete(from);
   programarExpiracionSesion(from);
+
+  const sesionAgendamiento = sesionesAgendamiento.get(from);
+  if (sesionAgendamiento) {
+    guardarSesionAgendamiento(from, {
+      ...sesionAgendamiento,
+      timestamp: Date.now()
+    });
+  }
 }
 
 function limpiarSesionesUsuario(from) {
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
-  sesionesAgendamiento.delete(from);
+  eliminarSesionAgendamiento(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
@@ -4650,12 +4707,12 @@ function limpiarSesionesUsuario(from) {
   cancelarExpiracionSesion(from);
 }
 
-function programarExpiracionSesion(from) {
+function programarExpiracionSesion(from, delayMs = SESION_USUARIO_TTL_MS) {
   cancelarExpiracionSesion(from);
 
   const timer = setTimeout(() => {
     expirarSesionUsuario(from);
-  }, SESION_USUARIO_TTL_MS);
+  }, delayMs);
 
   temporizadoresSesion.set(from, timer);
 }
@@ -4694,7 +4751,7 @@ async function expirarSesionUsuario(from) {
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
-  sesionesAgendamiento.delete(from);
+  eliminarSesionAgendamiento(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
@@ -4746,7 +4803,7 @@ function consumirSesionUsuarioExpirada(from) {
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
-  sesionesAgendamiento.delete(from);
+  eliminarSesionAgendamiento(from);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
@@ -5215,7 +5272,7 @@ async function iniciarSeleccionFechaAgendamiento(to, sesion) {
   try {
     const fechas = await consultarFechasDisponiblesAgendamiento(sesion);
 
-    sesionesAgendamiento.set(to, {
+    guardarSesionAgendamiento(to, {
       ...sesionesAgendamiento.get(to),
       paso: "seleccionando_fecha",
       fechasDisponibles: fechas.fechasDisponibles,
@@ -6583,6 +6640,45 @@ function construirSesionAsesorDesdePersistencia(row) {
   };
 }
 
+function construirSesionAgendamientoDesdePersistencia(row) {
+  if (!row?.phone || !row.payload_json) {
+    return null;
+  }
+
+  try {
+    const payload = typeof row.payload_json === "string"
+      ? JSON.parse(row.payload_json)
+      : row.payload_json;
+
+    if (!payload?.paso) {
+      return null;
+    }
+
+    const timestamp = Number.isFinite(Number(payload.timestamp))
+      ? Number(payload.timestamp)
+      : fechaPersistidaAMs(row.updated_at);
+
+    if (Date.now() - timestamp > SESION_USUARIO_TTL_MS) {
+      return null;
+    }
+
+    return {
+      phone: row.phone,
+      sessionId: row.session_id || null,
+      sesion: {
+        ...payload,
+        timestamp
+      }
+    };
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_DB] Payload persistido invalido:", construirDetalleErrorLog(error, {
+      action: "appointment_session_parse",
+      phone: row.phone
+    }));
+    return null;
+  }
+}
+
 async function restaurarEstadoAsesoresDesdeBD() {
   const startedAt = Date.now();
 
@@ -6628,6 +6724,44 @@ async function restaurarEstadoAsesoresDesdeBD() {
   } catch (error) {
     console.warn("[ASESOR_DB] No se pudo restaurar estado. Iniciando solo en memoria:", construirDetalleErrorLog(error, {
       action: "restore_active",
+      elapsedMs: Date.now() - startedAt
+    }));
+  }
+}
+
+async function restaurarSesionesAgendamientoDesdeBD() {
+  const startedAt = Date.now();
+
+  try {
+    const rows = await obtenerSesionesAgendamientoPersistidas();
+    let restauradas = 0;
+
+    for (const row of rows || []) {
+      const restaurada = construirSesionAgendamientoDesdePersistencia(row);
+
+      if (!restaurada) {
+        continue;
+      }
+
+      sesionesAgendamiento.set(restaurada.phone, restaurada.sesion);
+      sesionesUsuarios.set(restaurada.phone, {
+        timestamp: restaurada.sesion.timestamp,
+        sessionId: restaurada.sessionId || generarSessionId()
+      });
+      sesionesExpiradas.delete(restaurada.phone);
+
+      const tiempoRestante = Math.max(1, SESION_USUARIO_TTL_MS - (Date.now() - restaurada.sesion.timestamp));
+      programarExpiracionSesion(restaurada.phone, tiempoRestante);
+      restauradas += 1;
+    }
+
+    console.log("[AGENDAMIENTO_DB] Sesiones restauradas:", {
+      total: restauradas,
+      elapsedMs: Date.now() - startedAt
+    });
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_DB] No se pudo restaurar sesiones. Iniciando solo en memoria:", construirDetalleErrorLog(error, {
+      action: "appointment_session_restore_active",
       elapsedMs: Date.now() - startedAt
     }));
   }
@@ -6691,13 +6825,16 @@ function programarRevisionFeriados() {
   });
 }
 
-restaurarEstadoAsesoresDesdeBD().finally(() => {
+Promise.all([
+  restaurarEstadoAsesoresDesdeBD(),
+  restaurarSesionesAgendamientoDesdeBD()
+]).finally(() => {
   app.listen(PORT, () => {
-  console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`);
-  console.log(`[CONFIG] Entorno: ${APP_ENV}`);
-  console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
-  console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
-  inicializarCatalogoServicios();
-  programarRevisionFeriados();
+    console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`);
+    console.log(`[CONFIG] Entorno: ${APP_ENV}`);
+    console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
+    console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
+    inicializarCatalogoServicios();
+    programarRevisionFeriados();
   });
 });

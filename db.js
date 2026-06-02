@@ -212,6 +212,43 @@ async function ejecutarAsesorQuery(sql, params = [], action = "asesor_query") {
   }
 }
 
+async function ejecutarAgendamientoQuery(sql, params = [], action = "appointment_query") {
+  if (!dbConfigurada()) {
+    return null;
+  }
+
+  const startedAt = Date.now();
+  let timeoutId;
+
+  try {
+    const result = await Promise.race([
+      ejecutarPoolConTimezone(sql, params),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Timeout MySQL despues de ${DB_QUERY_TIMEOUT_MS}ms`));
+        }, DB_QUERY_TIMEOUT_MS);
+      })
+    ]);
+
+    console.log("[AGENDAMIENTO_DB] Query OK:", {
+      action,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return result;
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_DB] Query fallo:", construirDetalleErrorDb(error, {
+      action,
+      elapsedMs: Date.now() - startedAt
+    }));
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function ejecutarFeriadosQuery(sql, params = [], action = "feriados_query") {
   if (!dbConfigurada()) {
     return null;
@@ -273,8 +310,21 @@ async function obtenerAreasAgendables() {
          WHERE c.status = ?
            AND s.status = ?
            AND s.deleted_at IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM famysufk_appointments.employee_service es
+             INNER JOIN famysufk_appointments.employees e
+               ON e.id = es.employee_id
+             INNER JOIN famysufk_appointments.users u
+               ON u.id = e.user_id
+             WHERE es.service_id = s.id
+               AND u.status = ?
+               AND e.days IS NOT NULL
+               AND e.days <> ''
+               AND e.days <> '[]'
+           )
          ORDER BY c.title ASC`,
-        [1, 1]
+        [1, 1, 1]
       ),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
@@ -329,13 +379,26 @@ async function obtenerServiciosAgendablesPorArea(areaId) {
 
     const [rows] = await Promise.race([
       ejecutarPoolConTimezone(
-        `SELECT id, title, price, sale_price, is_presential, is_virtual
-         FROM famysufk_appointments.services
-         WHERE category_id = ?
-           AND status = ?
-           AND deleted_at IS NULL
-         ORDER BY title ASC`,
-        [areaId, 1]
+        `SELECT s.id, s.title, s.price, s.sale_price, s.is_presential, s.is_virtual
+         FROM famysufk_appointments.services s
+         WHERE s.category_id = ?
+           AND s.status = ?
+           AND s.deleted_at IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM famysufk_appointments.employee_service es
+             INNER JOIN famysufk_appointments.employees e
+               ON e.id = es.employee_id
+             INNER JOIN famysufk_appointments.users u
+               ON u.id = e.user_id
+             WHERE es.service_id = s.id
+               AND u.status = ?
+               AND e.days IS NOT NULL
+               AND e.days <> ''
+               AND e.days <> '[]'
+           )
+         ORDER BY s.title ASC`,
+        [areaId, 1, 1]
       ),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
@@ -706,6 +769,65 @@ async function obtenerEstadoAsesoresPersistido() {
   };
 }
 
+async function guardarSesionAgendamientoPersistida(phone, sessionId, sesion, ttlMs) {
+  if (!dbConfigurada() || !phone || !sesion?.paso) {
+    return;
+  }
+
+  const now = Date.now();
+  const timestamp = Number.isFinite(Number(sesion.timestamp)) ? Number(sesion.timestamp) : now;
+  const expiresAt = timestamp + ttlMs;
+
+  await ejecutarAgendamientoQuery(
+    `INSERT INTO chatbot_agendamiento_sesiones
+      (phone, session_id, paso, payload_json, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, NOW(), NOW(), FROM_UNIXTIME(? / 1000))
+     ON DUPLICATE KEY UPDATE
+       session_id = VALUES(session_id),
+       paso = VALUES(paso),
+       payload_json = VALUES(payload_json),
+       updated_at = NOW(),
+       expires_at = VALUES(expires_at)`,
+    [
+      phone,
+      sessionId || null,
+      sesion.paso,
+      JSON.stringify({ ...sesion, timestamp }),
+      expiresAt
+    ],
+    "appointment_session_upsert"
+  );
+}
+
+async function eliminarSesionAgendamientoPersistida(phone) {
+  if (!dbConfigurada() || !phone) {
+    return;
+  }
+
+  await ejecutarAgendamientoQuery(
+    "DELETE FROM chatbot_agendamiento_sesiones WHERE phone = ?",
+    [phone],
+    "appointment_session_delete"
+  );
+}
+
+async function obtenerSesionesAgendamientoPersistidas() {
+  if (!dbConfigurada()) {
+    return [];
+  }
+
+  const [rows] = await ejecutarAgendamientoQuery(
+    `SELECT phone, session_id, paso, payload_json, updated_at, expires_at
+     FROM chatbot_agendamiento_sesiones
+     WHERE expires_at > NOW()
+     ORDER BY updated_at ASC`,
+    [],
+    "appointment_session_restore_active"
+  );
+
+  return rows || [];
+}
+
 function columnaSessionIdNoExiste(error) {
   return error?.code === "ER_BAD_FIELD_ERROR" && /session_id/i.test(error.message || "");
 }
@@ -720,6 +842,9 @@ module.exports = {
   guardarSesionAsesorPersistida,
   finalizarSesionAsesorPersistida,
   obtenerEstadoAsesoresPersistido,
+  guardarSesionAgendamientoPersistida,
+  eliminarSesionAgendamientoPersistida,
+  obtenerSesionesAgendamientoPersistidas,
   obtenerFeriadosPendientesRecordatorio,
   marcarRecordatorioFeriadoEnviado,
   obtenerConfirmacionFeriadoPendiente,
