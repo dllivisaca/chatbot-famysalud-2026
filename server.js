@@ -2235,6 +2235,16 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "seleccionando_fecha") {
+    await manejarSeleccionFechaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "seleccionando_horario") {
+    await manejarSeleccionHorarioAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -2533,6 +2543,151 @@ Por favor responde con 1 para Presencial o 2 para Virtual.`
   await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
 }
 
+async function manejarSeleccionFechaAgendamiento(from, text, messageId, sesion) {
+  const indiceFecha = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const fechaSeleccionada = indiceFecha === null ? null : sesion.fechasDisponibles?.[indiceFecha];
+
+  if (!fechaSeleccionada) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_fecha",
+      payload: {
+        reason: "invalid_appointment_date",
+        totalOptions: sesion.fechasDisponibles?.length || 0
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa fecha 😅
+Por favor responde con un número válido de la lista de fechas.
+Ejemplo: 1`
+    );
+    return;
+  }
+
+  const sesionConFecha = {
+    ...sesion,
+    appointmentDate: fechaSeleccionada.date,
+    appointmentDateLabel: fechaSeleccionada.label,
+    timestamp: Date.now()
+  };
+
+  sesionesAgendamiento.set(from, sesionConFecha);
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    flowKey: "agendamiento_fecha",
+    payload: {
+      action: "select_appointment_date",
+      selectedIndex: indiceFecha,
+      appointmentDate: fechaSeleccionada.date,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    }
+  });
+
+  await iniciarSeleccionHorarioAgendamiento(from, sesionConFecha);
+}
+
+async function iniciarSeleccionHorarioAgendamiento(to, sesion) {
+  try {
+    const horariosDisponibles = await consultarHorariosDisponiblesAgendamiento(sesion);
+
+    sesionesAgendamiento.set(to, {
+      ...sesionesAgendamiento.get(to),
+      paso: "seleccionando_horario",
+      horariosDisponibles,
+      timestamp: Date.now()
+    });
+
+    if (!horariosDisponibles.length) {
+      await enviarMensajeAgendamientoConNavegacion(
+        to,
+        `Fecha seleccionada: ${sesion.appointmentDateLabel}
+
+Por ahora no encontramos horarios disponibles para esta fecha. Puedes volver atrás para elegir otra fecha o regresar al menú principal.`
+      );
+      return;
+    }
+
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeHorariosAgendamiento(sesion.appointmentDateLabel, horariosDisponibles),
+      "seleccionando_horario"
+    );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudieron cargar horarios disponibles:", construirDetalleErrorLog(error, {
+      action: "load_available_times",
+      flowKey: "agendamiento_horarios",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate
+    }));
+
+    await enviarMensajeAgendamientoConNavegacion(
+      to,
+      "No pude cargar los horarios disponibles en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
+    );
+  }
+}
+
+async function manejarSeleccionHorarioAgendamiento(from, text, messageId, sesion) {
+  const indiceHorario = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const horarioSeleccionado = indiceHorario === null ? null : sesion.horariosDisponibles?.[indiceHorario];
+
+  if (!horarioSeleccionado) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_horario",
+      payload: {
+        reason: "invalid_appointment_time",
+        totalOptions: sesion.horariosDisponibles?.length || 0
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré ese horario 😅
+Por favor responde con un número válido de la lista de horarios.
+Ejemplo: 1`
+    );
+    return;
+  }
+
+  sesionesAgendamiento.set(from, {
+    ...sesion,
+    paso: "confirmando_turno",
+    appointmentTime: horarioSeleccionado.start,
+    appointmentEndTime: horarioSeleccionado.end,
+    appointmentTimeLabel: horarioSeleccionado.label,
+    timestamp: Date.now()
+  });
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    flowKey: "agendamiento_horario",
+    payload: {
+      action: "select_appointment_time",
+      selectedIndex: indiceHorario,
+      appointmentDate: sesion.appointmentDate,
+      appointmentTime: horarioSeleccionado.start,
+      appointmentEndTime: horarioSeleccionado.end,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    }
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    `Turno seleccionado:
+${sesion.appointmentDateLabel}
+${horarioSeleccionado.label}
+
+En el siguiente paso reservaremos temporalmente este turno.`
+  );
+}
+
 async function volverAgendamiento(to, messageId) {
   const sesion = obtenerSesionAgendamiento(to);
 
@@ -2578,6 +2733,28 @@ async function volverAgendamiento(to, messageId) {
       );
       return;
     }
+  }
+
+  if ((sesion?.paso === "seleccionando_horario" || sesion?.paso === "confirmando_turno")
+    && Array.isArray(sesion.fechasDisponibles)
+    && sesion.fechasDisponibles.length) {
+    sesionesAgendamiento.set(to, {
+      ...sesion,
+      paso: "seleccionando_fecha",
+      appointmentDate: null,
+      appointmentDateLabel: null,
+      horariosDisponibles: [],
+      appointmentTime: null,
+      appointmentEndTime: null,
+      appointmentTimeLabel: null,
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeFechasAgendamiento(sesion.fechasDisponibles),
+      "seleccionando_fecha"
+    );
+    return;
   }
 
   if (sesion?.paso === "seleccionando_modalidad" && Array.isArray(sesion.profesionales) && sesion.profesionales.length) {
@@ -4970,7 +5147,7 @@ Ejemplo: 2`;
 
 function construirMensajeServiciosAgendamiento(areaTitle, servicios) {
   const listadoServicios = servicios
-    .map((servicio, index) => `${index + 1}. ${servicio.title}`)
+    .map((servicio, index) => `${index + 1}. ${construirTituloServicioAgendamiento(servicio)}`)
     .join("\n");
 
   return `Área seleccionada: ${areaTitle}
@@ -4981,6 +5158,16 @@ ${listadoServicios}
 
 Responde con el número del servicio.
 Ejemplo: 1`;
+}
+
+function construirTituloServicioAgendamiento(servicio) {
+  const precio = obtenerPrecioNumerico(servicio.price);
+
+  if (precio === null) {
+    return servicio.title;
+  }
+
+  return `${servicio.title} (Transferencia: ${formatearPrecio(precio)})`;
 }
 
 function construirMensajeProfesionalesAgendamiento(serviceTitle, profesionales) {
@@ -5186,6 +5373,152 @@ function construirMensajeFechasAgendamiento(fechasDisponibles) {
 ${listadoFechas}
 
 Responde con el número de la fecha.
+Ejemplo: 1`;
+}
+
+async function consultarHorariosDisponiblesAgendamiento(sesion) {
+  if (!APPWEB_CHATBOT_API_KEY) {
+    throw new Error("Falta APPWEB_CHATBOT_API_KEY para consultar horarios disponibles.");
+  }
+
+  const url = construirAppWebApiUrl(
+    `/api/chatbot/employees/${encodeURIComponent(sesion.professionalId)}/availability/${encodeURIComponent(sesion.appointmentDate)}`
+  );
+
+  console.log("[AGENDAMIENTO_API] Consultando horarios disponibles:", {
+    action: "available_times_select",
+    professionalId: sesion.professionalId,
+    serviceId: sesion.serviceId,
+    appointmentDate: sesion.appointmentDate
+  });
+
+  const response = await axios.get(url, {
+    timeout: 10000,
+    params: {
+      service_id: sesion.serviceId
+    },
+    headers: {
+      "X-Chatbot-Api-Key": APPWEB_CHATBOT_API_KEY
+    }
+  });
+
+  const totalSlotsApi = contarSlotsApiHorarios(response.data);
+
+  console.log("[AGENDAMIENTO] Horarios API recibidos:", {
+    url,
+    employeeId: sesion.professionalId,
+    serviceId: sesion.serviceId,
+    appointmentDate: sesion.appointmentDate,
+    totalSlotsApi,
+    payload: response.data
+  });
+
+  const horariosDisponibles = normalizarRespuestaHorariosDisponibles(response.data);
+
+  console.log("[AGENDAMIENTO] Horarios normalizados:", {
+    employeeId: sesion.professionalId,
+    serviceId: sesion.serviceId,
+    appointmentDate: sesion.appointmentDate,
+    totalSlotsNormalizados: horariosDisponibles.length,
+    horariosDisponibles
+  });
+
+  return horariosDisponibles;
+}
+
+function normalizarRespuestaHorariosDisponibles(data) {
+  const posiblesListas = [
+    data?.available_times,
+    data?.times,
+    data?.slots,
+    data?.data?.available_times,
+    data?.data?.times,
+    data?.data?.slots,
+    data?.data,
+    data
+  ];
+  const lista = posiblesListas.find((item) => Array.isArray(item)) || [];
+
+  return lista
+    .map((item) => normalizarHorarioDisponible(item))
+    .filter(Boolean);
+}
+
+function contarSlotsApiHorarios(data) {
+  const posiblesListas = [
+    data?.available_slots,
+    data?.available_times,
+    data?.times,
+    data?.slots,
+    data?.data?.available_slots,
+    data?.data?.available_times,
+    data?.data?.times,
+    data?.data?.slots,
+    data?.data,
+    data
+  ];
+  const lista = posiblesListas.find((item) => Array.isArray(item));
+  return Array.isArray(lista) ? lista.length : 0;
+}
+
+function normalizarHorarioDisponible(item) {
+  const start = typeof item === "string"
+    ? item
+    : item?.start || item?.start_time || item?.time || item?.from || item?.hora_inicio;
+  const end = typeof item === "string"
+    ? null
+    : item?.end || item?.end_time || item?.to || item?.hora_fin;
+
+  if (!start) {
+    return null;
+  }
+
+  return {
+    start,
+    end,
+    label: construirEtiquetaHorarioAgendamiento(start, end, item?.label),
+    raw: item
+  };
+}
+
+function construirEtiquetaHorarioAgendamiento(start, end, label) {
+  if (label) {
+    return String(label).trim();
+  }
+
+  const inicio = formatearHoraAgendamiento(start);
+  const fin = end ? formatearHoraAgendamiento(end) : "";
+
+  return fin ? `${inicio} - ${fin}` : inicio;
+}
+
+function formatearHoraAgendamiento(value) {
+  const match = String(value || "").match(/(\d{1,2}):(\d{2})/);
+
+  if (!match) {
+    return String(value || "").trim();
+  }
+
+  const hora24 = Number.parseInt(match[1], 10);
+  const minuto = match[2];
+  const periodo = hora24 >= 12 ? "PM" : "AM";
+  const hora12 = hora24 % 12 || 12;
+
+  return `${String(hora12).padStart(2, "0")}:${minuto} ${periodo}`;
+}
+
+function construirMensajeHorariosAgendamiento(appointmentDateLabel, horariosDisponibles) {
+  const listadoHorarios = horariosDisponibles
+    .map((horario, index) => `${index + 1}. ${horario.label}`)
+    .join("\n");
+
+  return `Fecha seleccionada: ${appointmentDateLabel}
+
+Selecciona el horario de tu cita:
+
+${listadoHorarios}
+
+Responde con el número del horario.
 Ejemplo: 1`;
 }
 
