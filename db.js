@@ -844,6 +844,141 @@ async function obtenerSesionesAgendamientoPersistidas() {
   return rows || [];
 }
 
+async function obtenerHoldsActivosAgendamiento(filtros) {
+  if (!dbConfigurada()) {
+    return [];
+  }
+
+  const [rows] = await ejecutarAgendamientoQuery(
+    `SELECT id, session_id, employee_id, service_id, appointment_date,
+            appointment_time, appointment_end_time, expires_at
+     FROM famysufk_appointments.appointment_holds
+     WHERE employee_id = ?
+       AND appointment_date = ?
+       AND expires_at > NOW()`,
+    [
+      filtros.professionalId,
+      filtros.appointmentDate
+    ],
+    "appointment_holds_active_select"
+  );
+
+  return rows || [];
+}
+
+async function crearHoldAgendamientoPersistido(hold) {
+  if (!dbConfigurada()) {
+    return null;
+  }
+
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.query(`SET time_zone = '${DB_TIMEZONE}'`);
+    await connection.beginTransaction();
+
+    await connection.execute("DELETE FROM famysufk_appointments.appointment_holds WHERE expires_at <= NOW()");
+
+    const [citas] = await connection.execute(
+      `SELECT id
+       FROM famysufk_appointments.appointments
+       WHERE employee_id = ?
+         AND appointment_date = ?
+         AND appointment_time < ?
+         AND appointment_end_time > ?
+         AND status NOT IN ('cancelled', 'Cancelled')
+       LIMIT 1
+       FOR UPDATE`,
+      [
+        hold.professionalId,
+        hold.appointmentDate,
+        hold.slotEndEc,
+        hold.slotStartEc
+      ]
+    );
+
+    if (citas.length) {
+      await connection.rollback();
+      return null;
+    }
+
+    const [ocupados] = await connection.execute(
+      `SELECT id
+       FROM famysufk_appointments.appointment_holds
+       WHERE employee_id = ?
+         AND appointment_date = ?
+         AND appointment_time < ?
+         AND appointment_end_time > ?
+         AND expires_at > NOW()
+         AND COALESCE(session_id, '') <> ?
+       LIMIT 1
+       FOR UPDATE`,
+      [
+        hold.professionalId,
+        hold.appointmentDate,
+        hold.slotEndEc,
+        hold.slotStartEc,
+        hold.sessionId || ""
+      ]
+    );
+
+    if (ocupados.length) {
+      await connection.rollback();
+      return null;
+    }
+
+    await connection.execute(
+      "DELETE FROM famysufk_appointments.appointment_holds WHERE session_id = ?",
+      [hold.sessionId || ""]
+    );
+
+    const [insert] = await connection.execute(
+      `INSERT INTO famysufk_appointments.appointment_holds
+        (employee_id, service_id, appointment_date, appointment_time, appointment_end_time,
+         session_id, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), NOW())`,
+      [
+        hold.professionalId,
+        hold.serviceId,
+        hold.appointmentDate,
+        hold.slotStartEc,
+        hold.slotEndEc,
+        hold.sessionId || null,
+        hold.expiresAtMs
+      ]
+    );
+
+    await connection.commit();
+    return {
+      id: insert.insertId,
+      expiresAtMs: hold.expiresAtMs
+    };
+  } catch (error) {
+    await connection.rollback();
+    console.warn("[AGENDAMIENTO_DB] Error creando hold:", construirDetalleErrorDb(error, {
+      action: "appointment_hold_create"
+    }));
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function liberarHoldAgendamientoPersistido(sessionId, holdId = null) {
+  if (!dbConfigurada() || !sessionId) {
+    return;
+  }
+
+  const params = holdId ? [sessionId, holdId] : [sessionId];
+  const whereHold = holdId ? " AND id = ?" : "";
+
+  await ejecutarAgendamientoQuery(
+    `DELETE FROM famysufk_appointments.appointment_holds WHERE session_id = ?${whereHold}`,
+    params,
+    "appointment_hold_release"
+  );
+}
+
 function columnaSessionIdNoExiste(error) {
   return error?.code === "ER_BAD_FIELD_ERROR" && /session_id/i.test(error.message || "");
 }
@@ -861,6 +996,9 @@ module.exports = {
   guardarSesionAgendamientoPersistida,
   eliminarSesionAgendamientoPersistida,
   obtenerSesionesAgendamientoPersistidas,
+  obtenerHoldsActivosAgendamiento,
+  crearHoldAgendamientoPersistido,
+  liberarHoldAgendamientoPersistido,
   obtenerFeriadosPendientesRecordatorio,
   marcarRecordatorioFeriadoEnviado,
   obtenerConfirmacionFeriadoPendiente,

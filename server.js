@@ -22,6 +22,9 @@ const {
   guardarSesionAgendamientoPersistida,
   eliminarSesionAgendamientoPersistida,
   obtenerSesionesAgendamientoPersistidas,
+  obtenerHoldsActivosAgendamiento,
+  crearHoldAgendamientoPersistido,
+  liberarHoldAgendamientoPersistido,
   obtenerFeriadosPendientesRecordatorio,
   marcarRecordatorioFeriadoEnviado,
   obtenerConfirmacionFeriadoPendiente,
@@ -75,6 +78,7 @@ const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CAT
 const CATALOG_CACHE_DIR = path.join(__dirname, "data");
 const CATALOG_CACHE_FILE = path.join(CATALOG_CACHE_DIR, "catalogo-servicios.json");
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
+const AGENDAMIENTO_HOLD_TTL_MS = 20 * 60 * 1000;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
 const PROMOCIONES_URL = "https://famysalud.com.ec/promociones";
@@ -849,13 +853,36 @@ function guardarSesionAgendamiento(phone, sesion) {
   return sesionPersistible;
 }
 
-function eliminarSesionAgendamiento(phone) {
+function eliminarSesionAgendamiento(phone, sessionId = null) {
+  const holdId = sesionesAgendamiento.get(phone)?.appointmentHoldId || null;
   sesionesAgendamiento.delete(phone);
+  liberarHoldAgendamientoSeguro(phone, holdId, sessionId);
   encolarPersistenciaAgendamiento(
     phone,
     "No se pudo eliminar sesion de agendamiento",
     () => eliminarSesionAgendamientoPersistida(phone)
   );
+}
+
+function liberarHoldAgendamientoSeguro(phone, holdId = null, sessionId = null) {
+  if (!phone) {
+    return;
+  }
+
+  const sessionIdHold = sessionId || obtenerSessionId(phone);
+
+  if (!sessionIdHold) {
+    return;
+  }
+
+  liberarHoldAgendamientoPersistido(sessionIdHold, holdId).catch((error) => {
+    console.warn("[AGENDAMIENTO_DB] No se pudo liberar hold. Continuando:", construirDetalleErrorLog(error, {
+      action: "appointment_hold_release",
+      phone,
+      sessionId: sessionIdHold,
+      holdId
+    }));
+  });
 }
 
 function obtenerSesionAsesorPorTelefono(phone) {
@@ -2645,6 +2672,14 @@ Ejemplo: 1`
 
 async function iniciarSeleccionHorarioAgendamiento(to, sesion) {
   try {
+    if (!sesion.appointmentMode) {
+      await enviarMensajeAgendamientoConNavegacion(
+        to,
+        "No pude determinar la modalidad de atención para consultar horarios. Puedes volver atrás para seleccionar la modalidad o regresar al menú principal."
+      );
+      return;
+    }
+
     const horariosDisponibles = await consultarHorariosDisponiblesAgendamiento(sesion);
 
     guardarSesionAgendamiento(to, {
@@ -2666,7 +2701,7 @@ Por ahora no encontramos horarios disponibles para esta fecha. Puedes volver atr
 
     await enviarMensajeAgendamientoConNavegacionSeguro(
       to,
-      construirMensajeHorariosAgendamiento(sesion.appointmentDateLabel, horariosDisponibles),
+      construirMensajeHorariosAgendamiento(sesion, horariosDisponibles),
       "seleccionando_horario"
     );
   } catch (error) {
@@ -2708,12 +2743,62 @@ Ejemplo: 1`
     return;
   }
 
+  if (!horarioSeleccionado.end) {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude determinar la hora de finalización de ese turno. Por favor intenta con otro horario o vuelve atrás."
+    );
+    return;
+  }
+
+  let hold;
+
+  try {
+    hold = await crearHoldAgendamientoPersistido({
+      phone: from,
+      sessionId: obtenerSessionId(from),
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate,
+      appointmentMode: sesion.appointmentMode,
+      slotStartEc: horarioSeleccionado.start,
+      slotEndEc: horarioSeleccionado.end,
+      expiresAtMs: Date.now() + AGENDAMIENTO_HOLD_TTL_MS
+    });
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudo crear hold:", construirDetalleErrorLog(error, {
+      action: "appointment_hold_create",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate,
+      appointmentTime: horarioSeleccionado.start
+    }));
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude reservar temporalmente ese turno en este momento. Por favor intenta con otro horario o vuelve atrás."
+    );
+    return;
+  }
+
+  if (!hold) {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "Ese turno acaba de ser reservado por otra persona. Por favor elige otro horario disponible."
+    );
+    return;
+  }
+
+  const appointmentTimeLabel = construirEtiquetaHorarioVisibleAgendamiento(horarioSeleccionado, sesion);
+
   guardarSesionAgendamiento(from, {
     ...sesion,
     paso: "confirmando_turno",
     appointmentTime: horarioSeleccionado.start,
     appointmentEndTime: horarioSeleccionado.end,
-    appointmentTimeLabel: horarioSeleccionado.label,
+    appointmentTimeLabel,
+    appointmentHoldId: hold.id,
+    appointmentHoldExpiresAt: hold.expiresAtMs,
     timestamp: Date.now()
   });
 
@@ -2726,6 +2811,7 @@ Ejemplo: 1`
       appointmentDate: sesion.appointmentDate,
       appointmentTime: horarioSeleccionado.start,
       appointmentEndTime: horarioSeleccionado.end,
+      appointmentHoldId: hold.id,
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId
     }
@@ -2735,9 +2821,9 @@ Ejemplo: 1`
     from,
     `Turno seleccionado:
 ${sesion.appointmentDateLabel}
-${horarioSeleccionado.label}
+${appointmentTimeLabel}
 
-En el siguiente paso reservaremos temporalmente este turno.`
+Reservamos temporalmente este turno durante 20 minutos.`
   );
 }
 
@@ -2791,6 +2877,10 @@ async function volverAgendamiento(to, messageId) {
   if ((sesion?.paso === "seleccionando_horario" || sesion?.paso === "confirmando_turno")
     && Array.isArray(sesion.fechasDisponibles)
     && sesion.fechasDisponibles.length) {
+    if (sesion.appointmentHoldId) {
+      liberarHoldAgendamientoSeguro(to, sesion.appointmentHoldId);
+    }
+
     guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "seleccionando_fecha",
@@ -2800,6 +2890,8 @@ async function volverAgendamiento(to, messageId) {
       appointmentTime: null,
       appointmentEndTime: null,
       appointmentTimeLabel: null,
+      appointmentHoldId: null,
+      appointmentHoldExpiresAt: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -4701,9 +4793,10 @@ function actualizarSesionUsuario(from, opciones = {}) {
 }
 
 function limpiarSesionesUsuario(from) {
+  const sessionId = obtenerSessionId(from);
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
-  eliminarSesionAgendamiento(from);
+  eliminarSesionAgendamiento(from, sessionId);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
@@ -4755,7 +4848,7 @@ async function expirarSesionUsuario(from) {
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
-  eliminarSesionAgendamiento(from);
+  eliminarSesionAgendamiento(from, sessionId);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
@@ -4807,7 +4900,7 @@ function consumirSesionUsuarioExpirada(from) {
   const sessionId = sesion.sessionId;
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
-  eliminarSesionAgendamiento(from);
+  eliminarSesionAgendamiento(from, sessionId);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
   limpiarSesionProveedor(from);
@@ -5460,13 +5553,17 @@ async function consultarHorariosDisponiblesAgendamiento(sesion) {
     action: "available_times_select",
     professionalId: sesion.professionalId,
     serviceId: sesion.serviceId,
-    appointmentDate: sesion.appointmentDate
+    appointmentDate: sesion.appointmentDate,
+    appointmentMode: sesion.appointmentMode
   });
 
   const response = await axios.get(url, {
     timeout: 10000,
     params: {
-      service_id: sesion.serviceId
+      service_id: sesion.serviceId,
+      mode: sesion.appointmentMode,
+      appointment_mode: sesion.appointmentMode,
+      modality: sesion.appointmentMode
     },
     headers: {
       "X-Chatbot-Api-Key": APPWEB_CHATBOT_API_KEY
@@ -5480,16 +5577,21 @@ async function consultarHorariosDisponiblesAgendamiento(sesion) {
     employeeId: sesion.professionalId,
     serviceId: sesion.serviceId,
     appointmentDate: sesion.appointmentDate,
+    appointmentMode: sesion.appointmentMode,
     totalSlotsApi,
     payload: response.data
   });
 
-  const horariosDisponibles = normalizarRespuestaHorariosDisponibles(response.data);
+  const horariosDisponibles = await filtrarHorariosConHoldsActivos(
+    normalizarRespuestaHorariosDisponibles(response.data),
+    sesion
+  );
 
   console.log("[AGENDAMIENTO] Horarios normalizados:", {
     employeeId: sesion.professionalId,
     serviceId: sesion.serviceId,
     appointmentDate: sesion.appointmentDate,
+    appointmentMode: sesion.appointmentMode,
     totalSlotsNormalizados: horariosDisponibles.length,
     horariosDisponibles
   });
@@ -5499,9 +5601,11 @@ async function consultarHorariosDisponiblesAgendamiento(sesion) {
 
 function normalizarRespuestaHorariosDisponibles(data) {
   const posiblesListas = [
+    data?.available_slots,
     data?.available_times,
     data?.times,
     data?.slots,
+    data?.data?.available_slots,
     data?.data?.available_times,
     data?.data?.times,
     data?.data?.slots,
@@ -5513,6 +5617,42 @@ function normalizarRespuestaHorariosDisponibles(data) {
   return lista
     .map((item) => normalizarHorarioDisponible(item))
     .filter(Boolean);
+}
+
+async function filtrarHorariosConHoldsActivos(horariosDisponibles, sesion) {
+  if (!horariosDisponibles.length) {
+    return [];
+  }
+
+  let holdsActivos = [];
+
+  try {
+    holdsActivos = await obtenerHoldsActivosAgendamiento({
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate
+    });
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_DB] No se pudieron consultar holds activos. Continuando con disponibilidad API:", construirDetalleErrorLog(error, {
+      action: "appointment_holds_active_select",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate
+    }));
+    return horariosDisponibles;
+  }
+
+  if (!holdsActivos.length) {
+    return horariosDisponibles;
+  }
+
+  const slotsOcupados = new Set(
+    holdsActivos.map((hold) => construirClaveSlotAgendamiento(hold.appointment_time, hold.appointment_end_time))
+  );
+
+  return horariosDisponibles.filter((horario) => (
+    !slotsOcupados.has(construirClaveSlotAgendamiento(horario.start, horario.end))
+  ));
 }
 
 function contarSlotsApiHorarios(data) {
@@ -5535,21 +5675,69 @@ function contarSlotsApiHorarios(data) {
 function normalizarHorarioDisponible(item) {
   const start = typeof item === "string"
     ? item
-    : item?.start || item?.start_time || item?.time || item?.from || item?.hora_inicio;
+    : item?.start || item?.start_time || item?.time || item?.from || item?.hora_inicio || item?.slot_start;
   const end = typeof item === "string"
     ? null
-    : item?.end || item?.end_time || item?.to || item?.hora_fin;
+    : item?.end || item?.end_time || item?.to || item?.hora_fin || item?.slot_end;
 
   if (!start) {
     return null;
   }
 
+  const startEc = normalizarHoraEcuadorAgendamiento(start);
+  const endEc = end ? normalizarHoraEcuadorAgendamiento(end) : null;
+
+  if (!startEc) {
+    return null;
+  }
+
   return {
-    start,
-    end,
-    label: construirEtiquetaHorarioAgendamiento(start, end, item?.label),
+    start: startEc,
+    end: endEc,
+    label: construirEtiquetaHorarioAgendamiento(startEc, endEc, item?.label),
     raw: item
   };
+}
+
+function construirClaveSlotAgendamiento(start, end) {
+  return `${normalizarHoraEcuadorAgendamiento(start) || ""}|${normalizarHoraEcuadorAgendamiento(end) || ""}`;
+}
+
+function normalizarHoraEcuadorAgendamiento(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return obtenerHoraEcuadorDesdeFecha(value);
+  }
+
+  const texto = String(value).trim();
+  const match = texto.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+
+  if (!match) {
+    return null;
+  }
+
+  const hora = Number.parseInt(match[1], 10);
+
+  if (!Number.isInteger(hora) || hora < 0 || hora > 23) {
+    return null;
+  }
+
+  return `${String(hora).padStart(2, "0")}:${match[2]}:${match[3] || "00"}`;
+}
+
+function obtenerHoraEcuadorDesdeFecha(fecha) {
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(fecha);
+  const valor = (tipo) => partes.find((parte) => parte.type === tipo)?.value;
+  return `${valor("hour")}:${valor("minute")}:${valor("second")}`;
 }
 
 function construirEtiquetaHorarioAgendamiento(start, end, label) {
@@ -5578,12 +5766,15 @@ function formatearHoraAgendamiento(value) {
   return `${String(hora12).padStart(2, "0")}:${minuto} ${periodo}`;
 }
 
-function construirMensajeHorariosAgendamiento(appointmentDateLabel, horariosDisponibles) {
+function construirMensajeHorariosAgendamiento(sesion, horariosDisponibles) {
   const listadoHorarios = horariosDisponibles
-    .map((horario, index) => `${index + 1}. ${horario.label}`)
+    .map((horario, index) => `${index + 1}. ${construirEtiquetaHorarioVisibleAgendamiento(horario, sesion)}`)
     .join("\n");
+  const notaZonaHoraria = construirNotaZonaHorariaAgendamiento(sesion);
 
-  return `Fecha seleccionada: ${appointmentDateLabel}
+  return `Fecha seleccionada: ${sesion.appointmentDateLabel}
+
+${notaZonaHoraria}
 
 Selecciona el horario de tu cita:
 
@@ -5591,6 +5782,70 @@ ${listadoHorarios}
 
 Responde con el número del horario.
 Ejemplo: 1`;
+}
+
+function construirNotaZonaHorariaAgendamiento(sesion) {
+  if (sesion.appointmentMode === "virtual") {
+    const zonaHorariaUsuario = obtenerZonaHorariaUsuarioAgendamiento(sesion);
+
+    if (zonaHorariaUsuario) {
+      return `Turnos virtuales mostrados en tu zona horaria: ${zonaHorariaUsuario}. Internamente se reservan en hora de Ecuador.`;
+    }
+
+    return "Aún no tenemos tu zona horaria. Todos los turnos se muestran en hora de Ecuador.";
+  }
+
+  return "Todos los turnos se muestran en hora de Ecuador.";
+}
+
+function obtenerZonaHorariaUsuarioAgendamiento(sesion) {
+  return sesion.userTimeZone || sesion.timeZone || sesion.timezone || null;
+}
+
+function construirEtiquetaHorarioVisibleAgendamiento(horario, sesion) {
+  const zonaHorariaUsuario = sesion.appointmentMode === "virtual"
+    ? obtenerZonaHorariaUsuarioAgendamiento(sesion)
+    : null;
+
+  if (!zonaHorariaUsuario) {
+    return horario.label;
+  }
+
+  const inicio = convertirHoraEcuadorAZonaUsuario(sesion.appointmentDate, horario.start, zonaHorariaUsuario);
+  const fin = horario.end
+    ? convertirHoraEcuadorAZonaUsuario(sesion.appointmentDate, horario.end, zonaHorariaUsuario)
+    : "";
+
+  if (!inicio) {
+    return horario.label;
+  }
+
+  return fin ? `${inicio} - ${fin}` : inicio;
+}
+
+function convertirHoraEcuadorAZonaUsuario(fechaISO, horaEcuador, timeZone) {
+  try {
+    const horaNormalizada = normalizarHoraEcuadorAgendamiento(horaEcuador);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || "")) || !horaNormalizada) {
+      return null;
+    }
+
+    const fecha = new Date(`${fechaISO}T${horaNormalizada}-05:00`);
+
+    return new Intl.DateTimeFormat("es-EC", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h12"
+    }).format(fecha);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudo convertir zona horaria:", {
+      timeZone,
+      error: error.message
+    });
+    return null;
+  }
 }
 
 function dividirMensajePorLineas(message, maxLength = 1200) {
