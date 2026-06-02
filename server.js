@@ -2694,6 +2694,7 @@ Ejemplo: 1`
     paso: "seleccionando_fecha",
     patientTimezone: zonaSeleccionada.timeZone,
     patientTimezoneLabel: zonaSeleccionada.label,
+    patientTimezoneFallback: !zonaSeleccionada.timeZone,
     timestamp: Date.now()
   };
 
@@ -2707,18 +2708,12 @@ Ejemplo: 1`
       selectedIndex: indiceZona,
       patientTimezone: zonaSeleccionada.timeZone,
       patientTimezoneLabel: zonaSeleccionada.label,
+      patientTimezoneFallback: !zonaSeleccionada.timeZone,
       appointmentMode: sesion.appointmentMode,
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId
     }
   });
-
-  if (!zonaSeleccionada.timeZone) {
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      "Por ahora mostraremos los turnos en hora de Ecuador para continuar con tu agendamiento."
-    );
-  }
 
   await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
 }
@@ -2974,6 +2969,7 @@ async function volverAgendamiento(to, messageId) {
         appointmentMode: null,
         patientTimezone: null,
         patientTimezoneLabel: null,
+        patientTimezoneFallback: null,
         timestamp: Date.now()
       });
       await enviarMensajeAgendamientoConNavegacion(
@@ -2993,6 +2989,7 @@ async function volverAgendamiento(to, messageId) {
         modalidadSeleccionUnica: null,
         patientTimezone: null,
         patientTimezoneLabel: null,
+        patientTimezoneFallback: null,
         timestamp: Date.now()
       });
       await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -3012,6 +3009,7 @@ async function volverAgendamiento(to, messageId) {
         appointmentMode: null,
         patientTimezone: null,
         patientTimezoneLabel: null,
+        patientTimezoneFallback: null,
         timestamp: Date.now()
       });
       await enviarMensajeAgendamientoConNavegacion(
@@ -3031,6 +3029,7 @@ async function volverAgendamiento(to, messageId) {
         modalidadSeleccionUnica: null,
         patientTimezone: null,
         patientTimezoneLabel: null,
+        patientTimezoneFallback: null,
         timestamp: Date.now()
       });
       await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -3080,6 +3079,7 @@ async function volverAgendamiento(to, messageId) {
       modalidades: [],
       patientTimezone: null,
       patientTimezoneLabel: null,
+      patientTimezoneFallback: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -3103,6 +3103,7 @@ async function volverAgendamiento(to, messageId) {
       profesionales: [],
       patientTimezone: null,
       patientTimezoneLabel: null,
+      patientTimezoneFallback: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -3122,6 +3123,7 @@ async function volverAgendamiento(to, messageId) {
       servicios: [],
       patientTimezone: null,
       patientTimezoneLabel: null,
+      patientTimezoneFallback: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(to, construirMensajeAreasAgendamiento(sesion.areas), "seleccionando_area");
@@ -5984,10 +5986,10 @@ function construirNotaZonaHorariaAgendamiento(sesion) {
     const zonaHorariaUsuario = obtenerZonaHorariaUsuarioAgendamiento(sesion);
 
     if (zonaHorariaUsuario) {
-      return `Turnos virtuales mostrados en tu zona horaria: ${sesion.patientTimezoneLabel || zonaHorariaUsuario}. Internamente se reservan en hora de Ecuador.`;
+      return `Turnos virtuales mostrados en tu zona horaria: ${sesion.patientTimezoneLabel || zonaHorariaUsuario}.`;
     }
 
-    return "Aún no tenemos tu zona horaria. Todos los turnos se muestran en hora de Ecuador.";
+    return "Turnos virtuales mostrados en hora de Ecuador.";
   }
 
   return "Todos los turnos se muestran en hora de Ecuador.";
