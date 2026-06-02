@@ -8,6 +8,7 @@ const DB_QUERY_TIMEOUT_MS = Number.isInteger(DB_QUERY_TIMEOUT_MS_CONFIG) && DB_Q
 const DB_PORT_EFFECTIVE = Number.isInteger(DB_PORT) ? DB_PORT : 3306;
 const DB_TIMEZONE = "-05:00";
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Guayaquil";
+const ECUADOR_TIMEZONE = "America/Guayaquil";
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
@@ -127,7 +128,7 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
 
 function obtenerFechaHoraMysqlEcuador(fecha = new Date()) {
   const partes = new Intl.DateTimeFormat("en-CA", {
-    timeZone: APP_TIMEZONE,
+    timeZone: ECUADOR_TIMEZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -872,6 +873,8 @@ async function crearHoldAgendamientoPersistido(hold) {
   }
 
   const connection = await pool.getConnection();
+  const createdAt = obtenerFechaHoraMysqlEcuador();
+  const expiresAt = obtenerFechaHoraMysqlEcuador(new Date(hold.expiresAtMs));
 
   try {
     await connection.query(`SET time_zone = '${DB_TIMEZONE}'`);
@@ -936,7 +939,7 @@ async function crearHoldAgendamientoPersistido(hold) {
       `INSERT INTO famysufk_appointments.appointment_holds
         (employee_id, service_id, appointment_date, appointment_time, appointment_end_time,
          session_id, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         hold.professionalId,
         hold.serviceId,
@@ -944,7 +947,8 @@ async function crearHoldAgendamientoPersistido(hold) {
         hold.slotStartEc,
         hold.slotEndEc,
         hold.sessionId || null,
-        hold.expiresAtMs
+        expiresAt,
+        createdAt
       ]
     );
 
@@ -972,11 +976,13 @@ async function liberarHoldAgendamientoPersistido(sessionId, holdId = null) {
   const params = holdId ? [sessionId, holdId] : [sessionId];
   const whereHold = holdId ? " AND id = ?" : "";
 
-  await ejecutarAgendamientoQuery(
+  const [result] = await ejecutarAgendamientoQuery(
     `DELETE FROM famysufk_appointments.appointment_holds WHERE session_id = ?${whereHold}`,
     params,
     "appointment_hold_release"
   );
+
+  return result?.affectedRows || 0;
 }
 
 function columnaSessionIdNoExiste(error) {

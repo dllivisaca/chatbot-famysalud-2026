@@ -875,14 +875,23 @@ function liberarHoldAgendamientoSeguro(phone, holdId = null, sessionId = null) {
     return;
   }
 
-  liberarHoldAgendamientoPersistido(sessionIdHold, holdId).catch((error) => {
-    console.warn("[AGENDAMIENTO_DB] No se pudo liberar hold. Continuando:", construirDetalleErrorLog(error, {
-      action: "appointment_hold_release",
-      phone,
-      sessionId: sessionIdHold,
-      holdId
-    }));
-  });
+  liberarHoldAgendamientoPersistido(sessionIdHold, holdId)
+    .then((liberados) => {
+      console.log("[AGENDAMIENTO_DB] Hold liberado:", {
+        phone,
+        sessionId: sessionIdHold,
+        holdId,
+        liberados
+      });
+    })
+    .catch((error) => {
+      console.warn("[AGENDAMIENTO_DB] No se pudo liberar hold. Continuando:", construirDetalleErrorLog(error, {
+        action: "appointment_hold_release",
+        phone,
+        sessionId: sessionIdHold,
+        holdId
+      }));
+    });
 }
 
 function obtenerSesionAsesorPorTelefono(phone) {
@@ -2751,6 +2760,17 @@ Ejemplo: 1`
     return;
   }
 
+  const slotStartEc = formatearHoraHoldAgendamiento(horarioSeleccionado.start);
+  const slotEndEc = formatearHoraHoldAgendamiento(horarioSeleccionado.end);
+
+  if (!slotStartEc || !slotEndEc) {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude normalizar la hora de ese turno. Por favor intenta con otro horario o vuelve atrás."
+    );
+    return;
+  }
+
   let hold;
 
   try {
@@ -2761,8 +2781,8 @@ Ejemplo: 1`
       serviceId: sesion.serviceId,
       appointmentDate: sesion.appointmentDate,
       appointmentMode: sesion.appointmentMode,
-      slotStartEc: horarioSeleccionado.start,
-      slotEndEc: horarioSeleccionado.end,
+      slotStartEc,
+      slotEndEc,
       expiresAtMs: Date.now() + AGENDAMIENTO_HOLD_TTL_MS
     });
   } catch (error) {
@@ -2771,7 +2791,7 @@ Ejemplo: 1`
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId,
       appointmentDate: sesion.appointmentDate,
-      appointmentTime: horarioSeleccionado.start
+      appointmentTime: slotStartEc
     }));
 
     await enviarMensajeAgendamientoConNavegacion(
@@ -2794,8 +2814,8 @@ Ejemplo: 1`
   guardarSesionAgendamiento(from, {
     ...sesion,
     paso: "confirmando_turno",
-    appointmentTime: horarioSeleccionado.start,
-    appointmentEndTime: horarioSeleccionado.end,
+    appointmentTime: slotStartEc,
+    appointmentEndTime: slotEndEc,
     appointmentTimeLabel,
     appointmentHoldId: hold.id,
     appointmentHoldExpiresAt: hold.expiresAtMs,
@@ -2809,8 +2829,8 @@ Ejemplo: 1`
       action: "select_appointment_time",
       selectedIndex: indiceHorario,
       appointmentDate: sesion.appointmentDate,
-      appointmentTime: horarioSeleccionado.start,
-      appointmentEndTime: horarioSeleccionado.end,
+      appointmentTime: slotStartEc,
+      appointmentEndTime: slotEndEc,
       appointmentHoldId: hold.id,
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId
@@ -2878,7 +2898,7 @@ async function volverAgendamiento(to, messageId) {
     && Array.isArray(sesion.fechasDisponibles)
     && sesion.fechasDisponibles.length) {
     if (sesion.appointmentHoldId) {
-      liberarHoldAgendamientoSeguro(to, sesion.appointmentHoldId);
+      liberarHoldAgendamientoSeguro(to, sesion.appointmentHoldId, obtenerSessionId(to));
     }
 
     guardarSesionAgendamiento(to, {
@@ -5726,6 +5746,11 @@ function normalizarHoraEcuadorAgendamiento(value) {
   }
 
   return `${String(hora).padStart(2, "0")}:${match[2]}:${match[3] || "00"}`;
+}
+
+function formatearHoraHoldAgendamiento(value) {
+  const hora = normalizarHoraEcuadorAgendamiento(value);
+  return hora ? hora.slice(0, 5) : null;
 }
 
 function obtenerHoraEcuadorDesdeFecha(fecha) {
