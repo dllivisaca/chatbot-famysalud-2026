@@ -145,6 +145,17 @@ let catalogoServiciosRefreshInterval = null;
 let feriadosRevisionInterval = null;
 let feriadosRevisionEnCurso = false;
 let ultimaRevisionRecordatorioFeriados = null;
+const ZONAS_HORARIAS_AGENDAMIENTO = [
+  { label: "Ecuador, Colombia y Perú", timeZone: "America/Guayaquil" },
+  { label: "Chile", timeZone: "America/Santiago" },
+  { label: "Argentina", timeZone: "America/Argentina/Buenos_Aires" },
+  { label: "España", timeZone: "Europe/Madrid" },
+  { label: "Estados Unidos Este", timeZone: "America/New_York" },
+  { label: "Estados Unidos Central", timeZone: "America/Chicago" },
+  { label: "Estados Unidos Montaña", timeZone: "America/Denver" },
+  { label: "Estados Unidos Pacífico", timeZone: "America/Los_Angeles" },
+  { label: "Otro país", timeZone: null }
+];
 
 function flagActiva(value) {
   return String(value || "").trim().toLowerCase() === "true";
@@ -2320,6 +2331,11 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "seleccionando_zona_horaria") {
+    await manejarSeleccionZonaHorariaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
   if (sesion.paso === "seleccionando_fecha") {
     await manejarSeleccionFechaAgendamiento(from, text, messageId, sesion);
     return;
@@ -2565,7 +2581,7 @@ Ejemplo: 1`
       from,
       construirMensajeModalidadUnicaAgendamiento(profesionalSeleccionado.name, modalidad.label)
     );
-    await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
+    await continuarDespuesDeModalidadAgendamiento(from, nuevaSesion);
     return;
   }
 
@@ -2628,6 +2644,81 @@ Por favor responde con 1 para Presencial o 2 para Virtual.`
       serviceId: sesion.serviceId
     }
   });
+
+  await continuarDespuesDeModalidadAgendamiento(from, nuevaSesion);
+}
+
+async function continuarDespuesDeModalidadAgendamiento(to, sesion) {
+  if (sesion.appointmentMode === "virtual" && !sesion.patientTimezone) {
+    const nuevaSesion = {
+      ...sesion,
+      paso: "seleccionando_zona_horaria",
+      patientTimezone: null,
+      patientTimezoneLabel: null,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(to, nuevaSesion);
+    await enviarMensajeAgendamientoConNavegacion(to, construirMensajeZonaHorariaAgendamiento());
+    return;
+  }
+
+  await iniciarSeleccionFechaAgendamiento(to, sesion);
+}
+
+async function manejarSeleccionZonaHorariaAgendamiento(from, text, messageId, sesion) {
+  const indiceZona = obtenerIndiceDesdeTexto(String(text || "").trim());
+  const zonaSeleccionada = indiceZona === null ? null : ZONAS_HORARIAS_AGENDAMIENTO[indiceZona];
+
+  if (!zonaSeleccionada) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_zona_horaria",
+      payload: {
+        reason: "invalid_appointment_timezone",
+        totalOptions: ZONAS_HORARIAS_AGENDAMIENTO.length
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa zona horaria 😅
+Por favor responde con un número válido de la lista.
+Ejemplo: 1`
+    );
+    return;
+  }
+
+  const nuevaSesion = {
+    ...sesion,
+    paso: "seleccionando_fecha",
+    patientTimezone: zonaSeleccionada.timeZone,
+    patientTimezoneLabel: zonaSeleccionada.label,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, nuevaSesion);
+
+  registrarEvento(from, "button_click", {
+    messageId,
+    flowKey: "agendamiento_zona_horaria",
+    payload: {
+      action: "select_appointment_timezone",
+      selectedIndex: indiceZona,
+      patientTimezone: zonaSeleccionada.timeZone,
+      patientTimezoneLabel: zonaSeleccionada.label,
+      appointmentMode: sesion.appointmentMode,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    }
+  });
+
+  if (!zonaSeleccionada.timeZone) {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "Por ahora mostraremos los turnos en hora de Ecuador para continuar con tu agendamiento."
+    );
+  }
 
   await iniciarSeleccionFechaAgendamiento(from, nuevaSesion);
 }
@@ -2860,12 +2951,29 @@ async function volverAgendamiento(to, messageId) {
     }
   });
 
+  if (sesion?.paso === "seleccionando_fecha" && sesion.appointmentMode === "virtual") {
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: "seleccionando_zona_horaria",
+      appointmentDate: null,
+      appointmentDateLabel: null,
+      fechasDisponibles: [],
+      minAllowed: null,
+      maxAllowed: null,
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacion(to, construirMensajeZonaHorariaAgendamiento());
+    return;
+  }
+
   if (sesion?.paso === "seleccionando_fecha") {
     if (!sesion.modalidadSeleccionUnica && Array.isArray(sesion.modalidades) && sesion.modalidades.length > 1) {
       guardarSesionAgendamiento(to, {
         ...sesion,
         paso: "seleccionando_modalidad",
         appointmentMode: null,
+        patientTimezone: null,
+        patientTimezoneLabel: null,
         timestamp: Date.now()
       });
       await enviarMensajeAgendamientoConNavegacion(
@@ -2883,6 +2991,46 @@ async function volverAgendamiento(to, messageId) {
         professionalName: null,
         appointmentMode: null,
         modalidadSeleccionUnica: null,
+        patientTimezone: null,
+        patientTimezoneLabel: null,
+        timestamp: Date.now()
+      });
+      await enviarMensajeAgendamientoConNavegacionSeguro(
+        to,
+        construirMensajeProfesionalesAgendamiento(sesion.serviceTitle, sesion.profesionales),
+        "seleccionando_profesional"
+      );
+      return;
+    }
+  }
+
+  if (sesion?.paso === "seleccionando_zona_horaria") {
+    if (!sesion.modalidadSeleccionUnica && Array.isArray(sesion.modalidades) && sesion.modalidades.length > 1) {
+      guardarSesionAgendamiento(to, {
+        ...sesion,
+        paso: "seleccionando_modalidad",
+        appointmentMode: null,
+        patientTimezone: null,
+        patientTimezoneLabel: null,
+        timestamp: Date.now()
+      });
+      await enviarMensajeAgendamientoConNavegacion(
+        to,
+        construirMensajeModalidadesAgendamiento(sesion.professionalName)
+      );
+      return;
+    }
+
+    if (Array.isArray(sesion.profesionales) && sesion.profesionales.length) {
+      guardarSesionAgendamiento(to, {
+        ...sesion,
+        paso: "seleccionando_profesional",
+        professionalId: null,
+        professionalName: null,
+        appointmentMode: null,
+        modalidadSeleccionUnica: null,
+        patientTimezone: null,
+        patientTimezoneLabel: null,
         timestamp: Date.now()
       });
       await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -2930,6 +3078,8 @@ async function volverAgendamiento(to, messageId) {
       professionalName: null,
       appointmentMode: null,
       modalidades: [],
+      patientTimezone: null,
+      patientTimezoneLabel: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -2951,6 +3101,8 @@ async function volverAgendamiento(to, messageId) {
       isPresential: null,
       isVirtual: null,
       profesionales: [],
+      patientTimezone: null,
+      patientTimezoneLabel: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(
@@ -2968,6 +3120,8 @@ async function volverAgendamiento(to, messageId) {
       areaId: null,
       areaTitle: null,
       servicios: [],
+      patientTimezone: null,
+      patientTimezoneLabel: null,
       timestamp: Date.now()
     });
     await enviarMensajeAgendamientoConNavegacionSeguro(to, construirMensajeAreasAgendamiento(sesion.areas), "seleccionando_area");
@@ -5391,6 +5545,22 @@ function construirMensajeModalidadUnicaAgendamiento(professionalName, modalidadL
 Modalidad disponible: ${modalidadLabel}`;
 }
 
+function construirMensajeZonaHorariaAgendamiento() {
+  return `🌎 Como elegiste atención virtual, necesitamos conocer tu zona horaria para mostrarte los horarios correctamente.
+
+1. Ecuador, Colombia y Perú (GMT-5)
+2. Chile (GMT-4)
+3. Argentina (GMT-3)
+4. España (GMT+1/GMT+2)
+5. Estados Unidos Este (GMT-5/GMT-4)
+6. Estados Unidos Central (GMT-6/GMT-5)
+7. Estados Unidos Montaña (GMT-7/GMT-6)
+8. Estados Unidos Pacífico (GMT-8/GMT-7)
+9. Otro país
+
+Responde con el número de tu zona horaria.`;
+}
+
 async function iniciarSeleccionFechaAgendamiento(to, sesion) {
   try {
     const fechas = await consultarFechasDisponiblesAgendamiento(sesion);
@@ -5814,7 +5984,7 @@ function construirNotaZonaHorariaAgendamiento(sesion) {
     const zonaHorariaUsuario = obtenerZonaHorariaUsuarioAgendamiento(sesion);
 
     if (zonaHorariaUsuario) {
-      return `Turnos virtuales mostrados en tu zona horaria: ${zonaHorariaUsuario}. Internamente se reservan en hora de Ecuador.`;
+      return `Turnos virtuales mostrados en tu zona horaria: ${sesion.patientTimezoneLabel || zonaHorariaUsuario}. Internamente se reservan en hora de Ecuador.`;
     }
 
     return "Aún no tenemos tu zona horaria. Todos los turnos se muestran en hora de Ecuador.";
@@ -5824,7 +5994,7 @@ function construirNotaZonaHorariaAgendamiento(sesion) {
 }
 
 function obtenerZonaHorariaUsuarioAgendamiento(sesion) {
-  return sesion.userTimeZone || sesion.timeZone || sesion.timezone || null;
+  return sesion.patientTimezone || sesion.userTimeZone || sesion.timeZone || sesion.timezone || null;
 }
 
 function construirEtiquetaHorarioVisibleAgendamiento(horario, sesion) {
