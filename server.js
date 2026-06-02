@@ -5359,8 +5359,12 @@ function formatearFechaDisponibleAgendamiento(fechaISO) {
     timeZone: "UTC"
   }).format(fecha);
   const diaCapitalizado = diaSemana.charAt(0).toUpperCase() + diaSemana.slice(1);
+  const nombreMes = new Intl.DateTimeFormat("es-EC", {
+    month: "long",
+    timeZone: "UTC"
+  }).format(fecha);
 
-  return `${diaCapitalizado} ${String(dia).padStart(2, "0")}/${String(mes).padStart(2, "0")}/${anio}`;
+  return `${diaCapitalizado} ${String(dia).padStart(2, "0")} de ${nombreMes} de ${anio}`;
 }
 
 function construirMensajeFechasAgendamiento(fechasDisponibles) {
