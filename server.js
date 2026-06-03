@@ -2436,6 +2436,23 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "consentimiento_datos_personales") {
+    await manejarConsentimientoDatosPersonalesAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "consentimiento_aceptado") {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `Gracias.
+
+Has autorizado el uso de los datos personales proporcionados para la gestión de la cita y el envío de información relacionada.
+
+El siguiente paso será seleccionar el método de pago.`
+    );
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -3366,7 +3383,7 @@ ${construirMensajeFacturacionMismosDatosAgendamiento()}`
   if (usarMismosDatos) {
     guardarSesionAgendamiento(from, {
       ...sesion,
-      paso: "facturacion_datos_completos",
+      paso: "consentimiento_datos_personales",
       billingName: sesion.patientFullName,
       billingDocType: sesion.patientDocType,
       billingDocNumber: sesion.patientDocNumber,
@@ -3608,12 +3625,70 @@ ${construirMensajeDireccionFacturacionAgendamiento()}`
 
   guardarSesionAgendamiento(from, {
     ...sesion,
-    paso: "facturacion_datos_completos",
+    paso: "consentimiento_datos_personales",
     billingAddress,
     timestamp: Date.now()
   });
 
   await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFacturacionCompletaAgendamiento());
+}
+
+async function manejarConsentimientoDatosPersonalesAgendamiento(from, text, messageId, sesion) {
+  const dataConsent = normalizarConsentimientoDatosPersonalesAgendamiento(text);
+
+  if (dataConsent === null) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_consentimiento",
+      payload: {
+        reason: "invalid_data_consent"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude identificar tu respuesta.
+
+1. Acepto
+2. No acepto
+
+Responde con el número de la opción.`
+    );
+    return;
+  }
+
+  if (!dataConsent) {
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "consentimiento_datos_personales",
+      dataConsent: false,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No podemos continuar con la cita sin la autorización para el uso de los datos personales.
+
+Puedes volver atrás o regresar al menú principal.`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "consentimiento_aceptado",
+    dataConsent: true,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    `Gracias.
+
+Has autorizado el uso de los datos personales proporcionados para la gestión de la cita y el envío de información relacionada.
+
+El siguiente paso será seleccionar el método de pago.`
+  );
 }
 
 async function volverAgendamiento(to, messageId) {
@@ -3693,6 +3768,14 @@ async function volverAgendamiento(to, messageId) {
     facturacion_datos_completos: {
       paso: "capturando_direccion_facturacion",
       message: construirMensajeDireccionFacturacionAgendamiento()
+    },
+    consentimiento_datos_personales: {
+      paso: "facturacion_datos_completos",
+      message: construirMensajeFacturacionCompletaAgendamiento()
+    },
+    consentimiento_aceptado: {
+      paso: "consentimiento_datos_personales",
+      message: construirMensajeConsentimientoDatosPersonalesAgendamiento()
     }
   };
 
@@ -7105,10 +7188,35 @@ Ejemplo: Av. Quito y Primero de Mayo`;
 function construirMensajeFacturacionCompletaAgendamiento() {
   return `Gracias. Ya registramos tus datos de facturación.
 
-El siguiente paso será aceptar el consentimiento para continuar con la cita.`;
+${construirMensajeConsentimientoDatosPersonalesAgendamiento()}`;
+}
+
+function construirMensajeConsentimientoDatosPersonalesAgendamiento() {
+  return `Consentimiento de datos personales
+
+Autorizo el uso de los datos personales proporcionados para la gestión de la cita y el envío de información relacionada.
+
+1. Acepto
+2. No acepto
+
+Responde con el número de la opción.`;
 }
 
 function normalizarRespuestaSiNoAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+
+  if (indice === 0) {
+    return true;
+  }
+
+  if (indice === 1) {
+    return false;
+  }
+
+  return null;
+}
+
+function normalizarConsentimientoDatosPersonalesAgendamiento(text) {
   const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
 
   if (indice === 0) {
