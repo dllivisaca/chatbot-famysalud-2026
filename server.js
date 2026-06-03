@@ -2346,6 +2346,46 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "capturando_nombre_paciente") {
+    await manejarNombrePacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_fecha_nacimiento_paciente") {
+    await manejarFechaNacimientoPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_tipo_documento_paciente") {
+    await manejarTipoDocumentoPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_numero_documento_paciente") {
+    await manejarNumeroDocumentoPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_correo_paciente") {
+    await manejarCorreoPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_celular_paciente") {
+    await manejarCelularPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_direccion_paciente") {
+    await manejarDireccionPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_comentario_paciente") {
+    await manejarComentarioPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -2928,7 +2968,7 @@ Ejemplo: 1`
 
   guardarSesionAgendamiento(from, {
     ...sesion,
-    paso: "confirmando_turno",
+    paso: "capturando_nombre_paciente",
     appointmentTime: slotStartEc,
     appointmentEndTime: slotEndEc,
     appointmentTimeLabel,
@@ -2958,7 +2998,256 @@ Ejemplo: 1`
 ${sesion.appointmentDateLabel}
 ${appointmentTimeLabel}
 
-Reservamos temporalmente este turno durante 20 minutos.`
+Reservamos temporalmente este turno durante 20 minutos.
+
+Ahora necesitamos tus datos para completar la cita.
+
+${construirMensajeNombrePacienteAgendamiento()}`
+  );
+}
+
+async function manejarNombrePacienteAgendamiento(from, text, messageId, sesion) {
+  const patientFullName = validarNombrePacienteAgendamiento(text);
+
+  if (!patientFullName) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_full_name"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese nombre. Debe incluir al menos nombre y apellido, usando solo letras y espacios.
+
+${construirMensajeNombrePacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_fecha_nacimiento_paciente",
+    patientFullName,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFechaNacimientoPacienteAgendamiento());
+}
+
+async function manejarFechaNacimientoPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientDob = normalizarFechaNacimientoPacienteAgendamiento(text);
+
+  if (!patientDob) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_dob"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar esa fecha. Usa el formato DD/MM/AAAA y verifica que sea una fecha real.
+
+${construirMensajeFechaNacimientoPacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_tipo_documento_paciente",
+    patientDob,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeTipoDocumentoPacienteAgendamiento());
+}
+
+async function manejarTipoDocumentoPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientDocType = normalizarTipoDocumentoPacienteAgendamiento(text);
+
+  if (!patientDocType) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_doc_type"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré ese tipo de documento.
+
+${construirMensajeTipoDocumentoPacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_numero_documento_paciente",
+    patientDocType,
+    patientDocNumber: null,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeNumeroDocumentoPacienteAgendamiento(patientDocType));
+}
+
+async function manejarNumeroDocumentoPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientDocNumber = validarDocumentoPacienteAgendamiento(text, sesion.patientDocType);
+
+  if (!patientDocNumber) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_doc_number",
+        patientDocType: sesion.patientDocType || null
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese número de documento.
+
+${construirMensajeNumeroDocumentoPacienteAgendamiento(sesion.patientDocType)}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_correo_paciente",
+    patientDocNumber,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeCorreoPacienteAgendamiento());
+}
+
+async function manejarCorreoPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientEmail = validarCorreoPacienteAgendamiento(text);
+
+  if (!patientEmail) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_email"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese correo electrónico.
+
+${construirMensajeCorreoPacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_celular_paciente",
+    patientEmail,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeCelularPacienteAgendamiento());
+}
+
+async function manejarCelularPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientPhone = normalizarCelularPacienteEcuadorAgendamiento(text);
+
+  if (!patientPhone) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_phone"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese celular. Escríbelo sin el 0 inicial y con 9 dígitos.
+
+${construirMensajeCelularPacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_direccion_paciente",
+    patientPhone,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeDireccionPacienteAgendamiento());
+}
+
+async function manejarDireccionPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientAddress = validarDireccionPacienteAgendamiento(text);
+
+  if (!patientAddress) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_address"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar esa dirección. Debe tener al menos 6 caracteres e incluir letras.
+
+${construirMensajeDireccionPacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_comentario_paciente",
+    patientAddress,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeComentarioPacienteAgendamiento());
+}
+
+async function manejarComentarioPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientNotes = normalizarNotasPacienteAgendamiento(text);
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "paciente_datos_completos",
+    patientNotes,
+    timestamp: Date.now()
+  });
+
+  registrarEvento(from, "flow_step_completed", {
+    messageId,
+    flowKey: "agendamiento_datos_paciente",
+    payload: {
+      step: "patient_data_completed"
+    }
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    `Gracias. Ya registramos tus datos del paciente.
+
+El siguiente paso será completar los datos de facturación.`
   );
 }
 
@@ -2974,6 +3263,49 @@ async function volverAgendamiento(to, messageId) {
       step: sesion?.paso || null
     }
   });
+
+  const pasosPacienteAnteriores = {
+    capturando_fecha_nacimiento_paciente: {
+      paso: "capturando_nombre_paciente",
+      message: construirMensajeNombrePacienteAgendamiento()
+    },
+    capturando_tipo_documento_paciente: {
+      paso: "capturando_fecha_nacimiento_paciente",
+      message: construirMensajeFechaNacimientoPacienteAgendamiento()
+    },
+    capturando_numero_documento_paciente: {
+      paso: "capturando_tipo_documento_paciente",
+      message: construirMensajeTipoDocumentoPacienteAgendamiento()
+    },
+    capturando_correo_paciente: {
+      paso: "capturando_numero_documento_paciente",
+      message: construirMensajeNumeroDocumentoPacienteAgendamiento(sesion?.patientDocType)
+    },
+    capturando_celular_paciente: {
+      paso: "capturando_correo_paciente",
+      message: construirMensajeCorreoPacienteAgendamiento()
+    },
+    capturando_direccion_paciente: {
+      paso: "capturando_celular_paciente",
+      message: construirMensajeCelularPacienteAgendamiento()
+    },
+    capturando_comentario_paciente: {
+      paso: "capturando_direccion_paciente",
+      message: construirMensajeDireccionPacienteAgendamiento()
+    }
+  };
+
+  const pasoPacienteAnterior = pasosPacienteAnteriores[sesion?.paso];
+
+  if (pasoPacienteAnterior) {
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: pasoPacienteAnterior.paso,
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacion(to, pasoPacienteAnterior.message);
+    return;
+  }
 
   if (sesion?.paso === "seleccionando_fecha" && sesion.appointmentMode === "virtual") {
     guardarSesionAgendamiento(to, {
@@ -3070,7 +3402,9 @@ async function volverAgendamiento(to, messageId) {
     }
   }
 
-  if ((sesion?.paso === "seleccionando_horario" || sesion?.paso === "confirmando_turno")
+  if ((sesion?.paso === "seleccionando_horario"
+    || sesion?.paso === "confirmando_turno"
+    || sesion?.paso === "capturando_nombre_paciente")
     && Array.isArray(sesion.fechasDisponibles)
     && sesion.fechasDisponibles.length) {
     if (sesion.appointmentHoldId) {
@@ -6034,6 +6368,169 @@ ${listadoHorarios}
 
 Responde con el número del horario.
 Ejemplo: 1`;
+}
+
+function construirMensajeNombrePacienteAgendamiento() {
+  return `Por favor escribe tu nombre completo.
+Ejemplo: María José Pérez González`;
+}
+
+function construirMensajeFechaNacimientoPacienteAgendamiento() {
+  return `Escribe tu fecha de nacimiento en formato DD/MM/AAAA.
+Ejemplo: 25/08/1990`;
+}
+
+function construirMensajeTipoDocumentoPacienteAgendamiento() {
+  return `Selecciona tu tipo de documento:
+
+1. Cédula
+2. Pasaporte
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeNumeroDocumentoPacienteAgendamiento(tipoDocumento) {
+  if (tipoDocumento === "pasaporte") {
+    return `Escribe tu número de pasaporte.
+Debe tener entre 6 y 15 caracteres, sin espacios.
+Ejemplo: A1234567`;
+  }
+
+  return `Escribe tu número de cédula.
+Debe tener exactamente 10 dígitos.
+Ejemplo: 0912345678`;
+}
+
+function construirMensajeCorreoPacienteAgendamiento() {
+  return `Escribe tu correo electrónico.
+Ejemplo: paciente@gmail.com`;
+}
+
+function construirMensajeCelularPacienteAgendamiento() {
+  return `Escribe tu número celular de Ecuador sin el 0 inicial.
+Ejemplo: 987654321`;
+}
+
+function construirMensajeDireccionPacienteAgendamiento() {
+  return `Escribe tu dirección.
+Ejemplo: Av. Quito y Primero de Mayo`;
+}
+
+function construirMensajeComentarioPacienteAgendamiento() {
+  return `¿Deseas agregar algún comentario para tu cita?
+
+Puedes escribir tu comentario o responder "omitir" para dejarlo vacío.`;
+}
+
+function validarNombrePacienteAgendamiento(text) {
+  const value = String(text || "").trim().replace(/\s+/g, " ");
+
+  if (value.length < 5) {
+    return null;
+  }
+
+  if (!/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]+$/.test(value)) {
+    return null;
+  }
+
+  if (value.split(" ").filter(Boolean).length < 2) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizarFechaNacimientoPacienteAgendamiento(text) {
+  const match = String(text || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const [, dia, mes, anio] = match;
+  const fecha = new Date(Date.UTC(Number(anio), Number(mes) - 1, Number(dia)));
+
+  if (
+    fecha.getUTCFullYear() !== Number(anio)
+    || fecha.getUTCMonth() !== Number(mes) - 1
+    || fecha.getUTCDate() !== Number(dia)
+  ) {
+    return null;
+  }
+
+  return `${anio}-${mes}-${dia}`;
+}
+
+function normalizarTipoDocumentoPacienteAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+
+  if (indice === 0) {
+    return "cedula";
+  }
+
+  if (indice === 1) {
+    return "pasaporte";
+  }
+
+  return null;
+}
+
+function validarDocumentoPacienteAgendamiento(text, tipo) {
+  const value = String(text || "").trim();
+
+  if (tipo === "cedula") {
+    return /^\d{10}$/.test(value) ? value : null;
+  }
+
+  if (tipo === "pasaporte") {
+    return /^[A-Za-z0-9]{6,15}$/.test(value) ? value.toUpperCase() : null;
+  }
+
+  return null;
+}
+
+function validarCorreoPacienteAgendamiento(text) {
+  const value = String(text || "").trim().toLowerCase();
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizarCelularPacienteEcuadorAgendamiento(text) {
+  const digits = String(text || "").replace(/\D/g, "");
+
+  if (!/^\d{9}$/.test(digits)) {
+    return null;
+  }
+
+  return `+593${digits}`;
+}
+
+function validarDireccionPacienteAgendamiento(text) {
+  const value = String(text || "").trim().replace(/\s+/g, " ");
+
+  if (value.length < 6) {
+    return null;
+  }
+
+  if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizarNotasPacienteAgendamiento(text) {
+  const value = String(text || "").trim();
+
+  if (/^(omitir|no)$/i.test(value)) {
+    return "";
+  }
+
+  return value;
 }
 
 function construirNotaZonaHorariaAgendamiento(sesion) {
