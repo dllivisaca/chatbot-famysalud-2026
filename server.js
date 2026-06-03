@@ -2766,17 +2766,36 @@ Ejemplo: 1`
 }
 
 async function iniciarSeleccionHorarioAgendamiento(to, sesion) {
+  let horariosDisponibles;
+  let mensajeHorarios;
+
+  if (!sesion.appointmentMode) {
+    await enviarMensajeAgendamientoConNavegacion(
+      to,
+      "No pude determinar la modalidad de atención para consultar horarios. Puedes volver atrás para seleccionar la modalidad o regresar al menú principal."
+    );
+    return;
+  }
+
   try {
-    if (!sesion.appointmentMode) {
-      await enviarMensajeAgendamientoConNavegacion(
-        to,
-        "No pude determinar la modalidad de atención para consultar horarios. Puedes volver atrás para seleccionar la modalidad o regresar al menú principal."
-      );
-      return;
-    }
+    horariosDisponibles = await consultarHorariosDisponiblesAgendamiento(sesion);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudieron consultar horarios disponibles:", construirDetalleErrorLog(error, {
+      action: "load_available_times",
+      flowKey: "agendamiento_horarios",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate
+    }));
 
-    const horariosDisponibles = await consultarHorariosDisponiblesAgendamiento(sesion);
+    await enviarMensajeAgendamientoConNavegacion(
+      to,
+      "No pude cargar los horarios disponibles en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
+    );
+    return;
+  }
 
+  try {
     guardarSesionAgendamiento(to, {
       ...sesionesAgendamiento.get(to),
       paso: "seleccionando_horario",
@@ -2794,24 +2813,34 @@ Por ahora no encontramos horarios disponibles para esta fecha. Puedes volver atr
       return;
     }
 
-    await enviarMensajeAgendamientoConNavegacionSeguro(
-      to,
-      construirMensajeHorariosAgendamiento(sesion, horariosDisponibles),
-      "seleccionando_horario"
-    );
+    mensajeHorarios = construirMensajeHorariosAgendamiento(sesion, horariosDisponibles);
   } catch (error) {
-    console.warn("[AGENDAMIENTO] No se pudieron cargar horarios disponibles:", construirDetalleErrorLog(error, {
-      action: "load_available_times",
+    console.warn("[AGENDAMIENTO] No se pudo preparar el mensaje de horarios disponibles:", construirDetalleErrorLog(error, {
+      action: "prepare_available_times_message",
       flowKey: "agendamiento_horarios",
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId,
-      appointmentDate: sesion.appointmentDate
+      appointmentDate: sesion.appointmentDate,
+      totalHorarios: horariosDisponibles?.length || 0
     }));
+    return;
+  }
 
-    await enviarMensajeAgendamientoConNavegacion(
+  try {
+    await enviarMensajeAgendamientoConNavegacionSeguro(
       to,
-      "No pude cargar los horarios disponibles en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
+      mensajeHorarios,
+      "seleccionando_horario"
     );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudo enviar el mensaje de horarios disponibles:", construirDetalleErrorLog(error, {
+      action: "send_available_times_message",
+      flowKey: "agendamiento_horarios",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate,
+      totalHorarios: horariosDisponibles.length
+    }));
   }
 }
 
