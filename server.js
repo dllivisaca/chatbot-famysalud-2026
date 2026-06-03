@@ -5564,9 +5564,27 @@ Responde con el número de tu zona horaria.`;
 }
 
 async function iniciarSeleccionFechaAgendamiento(to, sesion) {
-  try {
-    const fechas = await consultarFechasDisponiblesAgendamiento(sesion);
+  let fechas;
+  let mensajeFechas;
 
+  try {
+    fechas = await consultarFechasDisponiblesAgendamiento(sesion);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudieron consultar fechas disponibles:", construirDetalleErrorLog(error, {
+      action: "load_available_dates",
+      flowKey: "agendamiento_fechas",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    }));
+
+    await enviarMensajeAgendamientoConNavegacion(
+      to,
+      "No pude cargar las fechas disponibles en este momento. Por favor intenta nuevamente m\u00e1s tarde o vuelve atr\u00e1s."
+    );
+    return;
+  }
+
+  try {
     guardarSesionAgendamiento(to, {
       ...sesionesAgendamiento.get(to),
       paso: "seleccionando_fecha",
@@ -5579,31 +5597,39 @@ async function iniciarSeleccionFechaAgendamiento(to, sesion) {
     if (!fechas.fechasDisponibles.length) {
       await enviarMensajeAgendamientoConNavegacion(
         to,
-        "Por ahora no encontramos fechas disponibles para este profesional y servicio en el mes actual. Puedes volver atrás o regresar al menú principal."
+        "Por ahora no encontramos fechas disponibles para este profesional y servicio en el mes actual. Puedes volver atr\u00e1s o regresar al men\u00fa principal."
       );
       return;
     }
 
+    mensajeFechas = construirMensajeFechasAgendamiento(fechas.fechasDisponibles);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO] No se pudo preparar el mensaje de fechas disponibles:", construirDetalleErrorLog(error, {
+      action: "prepare_available_dates_message",
+      flowKey: "agendamiento_fechas",
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      totalFechas: fechas?.fechasDisponibles?.length || 0
+    }));
+    return;
+  }
+
+  try {
     await enviarMensajeAgendamientoConNavegacionSeguro(
       to,
-      construirMensajeFechasAgendamiento(fechas.fechasDisponibles),
+      mensajeFechas,
       "seleccionando_fecha"
     );
   } catch (error) {
-    console.warn("[AGENDAMIENTO] No se pudieron cargar fechas disponibles:", construirDetalleErrorLog(error, {
-      action: "load_available_dates",
+    console.warn("[AGENDAMIENTO] No se pudo enviar el mensaje de fechas disponibles:", construirDetalleErrorLog(error, {
+      action: "send_available_dates_message",
       flowKey: "agendamiento_fechas",
       professionalId: sesion.professionalId,
-      serviceId: sesion.serviceId
+      serviceId: sesion.serviceId,
+      totalFechas: fechas.fechasDisponibles.length
     }));
-
-    await enviarMensajeAgendamientoConNavegacion(
-      to,
-      "No pude cargar las fechas disponibles en este momento. Por favor intenta nuevamente más tarde o vuelve atrás."
-    );
   }
 }
-
 async function consultarFechasDisponiblesAgendamiento(sesion) {
   if (!APPWEB_CHATBOT_API_KEY) {
     throw new Error("Falta APPWEB_CHATBOT_API_KEY para consultar fechas disponibles.");
