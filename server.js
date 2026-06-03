@@ -2456,6 +2456,19 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "seleccionando_metodo_pago") {
+    await manejarSeleccionMetodoPagoAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "metodo_pago_seleccionado") {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "El siguiente paso del agendamiento será continuar con el pago."
+    );
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -3679,18 +3692,82 @@ Puedes volver atrás o regresar al menú principal.`
 
   guardarSesionAgendamiento(from, {
     ...sesion,
-    paso: "consentimiento_aceptado",
+    paso: "seleccionando_metodo_pago",
     dataConsent: true,
     timestamp: Date.now()
   });
 
+  await enviarSeleccionMetodoPagoAgendamiento(from, {
+    ...sesion,
+    paso: "seleccionando_metodo_pago",
+    dataConsent: true
+  });
+}
+
+async function enviarSeleccionMetodoPagoAgendamiento(to, sesion) {
+  const mensajeMetodoPago = construirMensajeMetodoPagoAgendamiento(sesion);
+
+  if (!mensajeMetodoPago) {
+    await enviarMensajeAgendamientoConNavegacion(
+      to,
+      "No pude calcular el valor de la cita en este momento. Por favor vuelve atrás o intenta nuevamente."
+    );
+    return;
+  }
+
+  await enviarMensajeAgendamientoConNavegacionSeguro(to, mensajeMetodoPago, "seleccionando_metodo_pago");
+}
+
+async function manejarSeleccionMetodoPagoAgendamiento(from, text, messageId, sesion) {
+  const paymentMethod = normalizarMetodoPagoAgendamiento(text);
+  const figuras = calcularFigurasPagoAgendamiento(sesion);
+
+  if (!figuras) {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude calcular el valor de la cita en este momento. Por favor vuelve atrás o intenta nuevamente."
+    );
+    return;
+  }
+
+  if (!paymentMethod) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_pago",
+      payload: {
+        reason: "invalid_payment_method"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude identificar el método de pago.
+
+1. Pago con tarjeta (precio estándar)
+2. Transferencia bancaria (descuento aplicado)
+
+Responde con el número de la opción.`
+    );
+    return;
+  }
+
+  const sesionConPago = {
+    ...sesion,
+    paso: "metodo_pago_seleccionado",
+    paymentMethod,
+    paymentAmount: paymentMethod === "transfer" ? figuras.transfer : figuras.standard,
+    paymentAmountStandard: figuras.standard,
+    paymentDiscountAmount: figuras.discount,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, sesionConPago);
+
+  const mensajeSeleccionado = construirMensajeMetodoPagoSeleccionadoAgendamiento(sesionConPago);
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
-    `Gracias.
-
-Has autorizado el uso de los datos personales proporcionados para la gestión de la cita y el envío de información relacionada.
-
-El siguiente paso será seleccionar el método de pago.`
+    mensajeSeleccionado || "El siguiente paso del agendamiento será continuar con el pago."
   );
 }
 
@@ -3779,8 +3856,26 @@ async function volverAgendamiento(to, messageId) {
     consentimiento_aceptado: {
       paso: "consentimiento_datos_personales",
       message: construirMensajeConsentimientoDatosPersonalesAgendamiento()
+    },
+    seleccionando_metodo_pago: {
+      paso: "consentimiento_datos_personales",
+      message: construirMensajeConsentimientoDatosPersonalesAgendamiento()
     }
   };
+
+  if (sesion?.paso === "metodo_pago_seleccionado") {
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentAmountStandard: null,
+      paymentDiscountAmount: null,
+      timestamp: Date.now()
+    });
+    await enviarSeleccionMetodoPagoAgendamiento(to, sesion);
+    return;
+  }
 
   if (sesion?.paso === "capturando_nombre_facturacion") {
     const pacienteMenorEdad = sesion.patientIsMinor ?? esPacienteMenorEdadAgendamiento(sesion.patientDob);
@@ -7231,6 +7326,114 @@ function normalizarConsentimientoDatosPersonalesAgendamiento(text) {
   }
 
   return null;
+}
+
+function calcularFigurasPagoAgendamiento(sesion) {
+  const transfer = obtenerPrecioNumerico(sesion?.servicePrice);
+
+  if (!Number.isFinite(transfer) || transfer <= 0) {
+    console.warn("[AGENDAMIENTO] No se pudo calcular valor de cita:", {
+      action: "calculate_appointment_payment_amounts",
+      serviceId: sesion?.serviceId || null,
+      servicePrice: sesion?.servicePrice || null
+    });
+    return null;
+  }
+
+  const standard = parseFloat((transfer / 0.9425).toFixed(2));
+  const discount = parseFloat((standard - transfer).toFixed(2));
+
+  return {
+    transfer,
+    standard,
+    discount
+  };
+}
+
+function formatearMontoAgendamiento(value) {
+  const monto = Number(value);
+  return Number.isFinite(monto) ? monto.toFixed(2) : "0.00";
+}
+
+function construirEtiquetaModalidadAgendamiento(appointmentMode) {
+  if (appointmentMode === "virtual") {
+    return "Virtual";
+  }
+
+  if (appointmentMode === "presential") {
+    return "Presencial";
+  }
+
+  return appointmentMode || "No especificada";
+}
+
+function construirMensajeMetodoPagoAgendamiento(sesion) {
+  const figuras = calcularFigurasPagoAgendamiento(sesion);
+
+  if (!figuras) {
+    return null;
+  }
+
+  return `Resumen de pago
+
+Servicio: ${sesion.serviceTitle || "No especificado"}
+Profesional: ${sesion.professionalName || "No especificado"}
+Modalidad: ${construirEtiquetaModalidadAgendamiento(sesion.appointmentMode)}
+Fecha: ${sesion.appointmentDateLabel || sesion.appointmentDate || "No especificada"}
+Horario: ${sesion.appointmentTimeLabel || sesion.appointmentTime || "No especificado"}
+
+Precio del servicio (estándar): $${formatearMontoAgendamiento(figuras.standard)}
+Total con transferencia bancaria: $${formatearMontoAgendamiento(figuras.transfer)}
+Descuento por transferencia: $${formatearMontoAgendamiento(figuras.discount)}
+
+Selecciona el método de pago:
+
+1. Pago con tarjeta (precio estándar)
+Pago inmediato y registro automático de la cita.
+
+2. Transferencia bancaria (descuento aplicado)
+Obtenga un descuento pagando por transferencia bancaria.
+
+Responde con el número de la opción.`;
+}
+
+function normalizarMetodoPagoAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+
+  if (indice === 0) {
+    return "card";
+  }
+
+  if (indice === 1) {
+    return "transfer";
+  }
+
+  return null;
+}
+
+function construirMensajeMetodoPagoSeleccionadoAgendamiento(sesion) {
+  const figuras = calcularFigurasPagoAgendamiento(sesion);
+
+  if (!figuras) {
+    return null;
+  }
+
+  if (sesion.paymentMethod === "transfer") {
+    return `Has seleccionado:
+Transferencia bancaria (descuento aplicado)
+
+Total a pagar: $${formatearMontoAgendamiento(figuras.transfer)}
+Descuento aplicado: $${formatearMontoAgendamiento(figuras.discount)}
+
+El siguiente paso será registrar los datos de la transferencia bancaria.`;
+  }
+
+  return `Has seleccionado:
+Pago con tarjeta (precio estándar)
+
+Total a pagar: $${formatearMontoAgendamiento(figuras.standard)}
+
+El siguiente paso será generar el enlace de pago.`;
 }
 
 function validarNombreFacturacionAgendamiento(text) {
