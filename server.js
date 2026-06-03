@@ -2432,7 +2432,14 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
   }
 
   if (sesion.paso === "facturacion_datos_completos") {
-    await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFacturacionCompletaAgendamiento());
+    const sesionConsentimiento = {
+      ...sesion,
+      paso: "consentimiento_datos_personales",
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(from, sesionConsentimiento);
+    await manejarConsentimientoDatosPersonalesAgendamiento(from, text, messageId, sesionConsentimiento);
     return;
   }
 
@@ -2444,11 +2451,7 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
   if (sesion.paso === "consentimiento_aceptado") {
     await enviarMensajeAgendamientoConNavegacion(
       from,
-      `Gracias.
-
-Has autorizado el uso de los datos personales proporcionados para la gestión de la cita y el envío de información relacionada.
-
-El siguiente paso será seleccionar el método de pago.`
+      "El siguiente paso será seleccionar el método de pago."
     );
     return;
   }
