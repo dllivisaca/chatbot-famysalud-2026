@@ -2391,6 +2391,51 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "confirmando_facturacion_mismos_datos") {
+    await manejarFacturacionMismosDatosAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_nombre_facturacion") {
+    await manejarNombreFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_tipo_documento_facturacion") {
+    await manejarTipoDocumentoFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_numero_documento_facturacion") {
+    await manejarNumeroDocumentoFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_correo_facturacion") {
+    await manejarCorreoFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_pais_celular_facturacion") {
+    await manejarPaisCelularFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_celular_facturacion") {
+    await manejarCelularFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_direccion_facturacion") {
+    await manejarDireccionFacturacionAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "facturacion_datos_completos") {
+    await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFacturacionCompletaAgendamiento());
+    return;
+  }
+
   await enviarMensajeAgendamientoConNavegacion(
     from,
     "Estoy preparando el siguiente paso del agendamiento. Por favor usa las opciones disponibles para continuar."
@@ -3270,11 +3315,19 @@ ${construirMensajeDireccionPacienteAgendamiento()}`
 
 async function manejarComentarioPacienteAgendamiento(from, text, messageId, sesion) {
   const patientNotes = normalizarNotasPacienteAgendamiento(text);
+  const pacienteMenorEdad = esPacienteMenorEdadAgendamiento(sesion.patientDob);
+  const siguientePaso = pacienteMenorEdad
+    ? "capturando_nombre_facturacion"
+    : "confirmando_facturacion_mismos_datos";
+  const siguienteMensaje = pacienteMenorEdad
+    ? construirMensajeNombreFacturacionMenorAgendamiento()
+    : construirMensajeFacturacionMismosDatosAgendamiento();
 
   guardarSesionAgendamiento(from, {
     ...sesion,
-    paso: "paciente_datos_completos",
+    paso: siguientePaso,
     patientNotes,
+    patientIsMinor: pacienteMenorEdad,
     timestamp: Date.now()
   });
 
@@ -3286,12 +3339,281 @@ async function manejarComentarioPacienteAgendamiento(from, text, messageId, sesi
     }
   });
 
-  await enviarMensajeAgendamientoConNavegacion(
-    from,
-    `Gracias. Ya registramos tus datos del paciente.
+  await enviarMensajeAgendamientoConNavegacion(from, siguienteMensaje);
+}
 
-El siguiente paso será completar los datos de facturación.`
-  );
+async function manejarFacturacionMismosDatosAgendamiento(from, text, messageId, sesion) {
+  const usarMismosDatos = normalizarRespuestaSiNoAgendamiento(text);
+
+  if (usarMismosDatos === null) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_same_patient"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré esa opción.
+
+${construirMensajeFacturacionMismosDatosAgendamiento()}`
+    );
+    return;
+  }
+
+  if (usarMismosDatos) {
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "facturacion_datos_completos",
+      billingName: sesion.patientFullName,
+      billingDocType: sesion.patientDocType,
+      billingDocNumber: sesion.patientDocNumber,
+      billingEmail: sesion.patientEmail,
+      billingPhoneCountry: sesion.patientPhoneCountry,
+      billingPhone: sesion.patientPhone,
+      billingAddress: sesion.patientAddress,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFacturacionCompletaAgendamiento());
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_nombre_facturacion",
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeNombreFacturacionAgendamiento());
+}
+
+async function manejarNombreFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingName = validarNombreFacturacionAgendamiento(text);
+
+  if (!billingName) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_name"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese nombre o razón social. Debe tener al menos 5 caracteres e incluir letras.
+
+${construirMensajeNombreFacturacionAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_tipo_documento_facturacion",
+    billingName,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeTipoDocumentoFacturacionAgendamiento());
+}
+
+async function manejarTipoDocumentoFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingDocType = normalizarTipoDocumentoFacturacionAgendamiento(text);
+
+  if (!billingDocType) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_doc_type"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré ese tipo de documento.
+
+${construirMensajeTipoDocumentoFacturacionAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_numero_documento_facturacion",
+    billingDocType,
+    billingDocNumber: null,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeNumeroDocumentoFacturacionAgendamiento(billingDocType));
+}
+
+async function manejarNumeroDocumentoFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingDocNumber = validarDocumentoFacturacionAgendamiento(text, sesion.billingDocType);
+
+  if (!billingDocNumber) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_doc_number",
+        billingDocType: sesion.billingDocType || null
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese número de documento.
+
+${construirMensajeNumeroDocumentoFacturacionAgendamiento(sesion.billingDocType)}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_correo_facturacion",
+    billingDocNumber,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeCorreoFacturacionAgendamiento());
+}
+
+async function manejarCorreoFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingEmail = validarCorreoPacienteAgendamiento(text);
+
+  if (!billingEmail) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_email"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese correo electrónico.
+
+${construirMensajeCorreoFacturacionAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_pais_celular_facturacion",
+    billingEmail,
+    billingPhoneCountry: null,
+    billingPhone: null,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajePaisCelularFacturacionAgendamiento());
+}
+
+async function manejarPaisCelularFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingPhoneCountry = normalizarPaisCelularPacienteAgendamiento(text);
+
+  if (!billingPhoneCountry) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_phone_country"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré ese país para el número celular.
+
+${construirMensajePaisCelularFacturacionAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_celular_facturacion",
+    billingPhoneCountry,
+    billingPhone: null,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeCelularFacturacionAgendamiento(billingPhoneCountry));
+}
+
+async function manejarCelularFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingPhone = normalizarCelularPacienteAgendamiento(text, sesion.billingPhoneCountry);
+
+  if (!billingPhone) {
+    const detalleError = sesion.billingPhoneCountry === "OTHER"
+      ? "Escríbelo con código de país, sin letras y con 8 a 15 dígitos."
+      : "Escríbelo sin el 0 inicial y con 9 dígitos.";
+
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_phone"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar ese celular. ${detalleError}
+
+${construirMensajeCelularFacturacionAgendamiento(sesion.billingPhoneCountry)}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_direccion_facturacion",
+    billingPhone,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeDireccionFacturacionAgendamiento());
+}
+
+async function manejarDireccionFacturacionAgendamiento(from, text, messageId, sesion) {
+  const billingAddress = validarDireccionPacienteAgendamiento(text);
+
+  if (!billingAddress) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_facturacion",
+      payload: {
+        reason: "invalid_billing_address"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar esa dirección. Debe tener al menos 6 caracteres e incluir letras.
+
+${construirMensajeDireccionFacturacionAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "facturacion_datos_completos",
+    billingAddress,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFacturacionCompletaAgendamiento());
 }
 
 async function volverAgendamiento(to, messageId) {
@@ -3339,8 +3661,61 @@ async function volverAgendamiento(to, messageId) {
     capturando_comentario_paciente: {
       paso: "capturando_direccion_paciente",
       message: construirMensajeDireccionPacienteAgendamiento()
+    },
+    confirmando_facturacion_mismos_datos: {
+      paso: "capturando_comentario_paciente",
+      message: construirMensajeComentarioPacienteAgendamiento()
+    },
+    capturando_tipo_documento_facturacion: {
+      paso: "capturando_nombre_facturacion",
+      message: construirMensajeNombreFacturacionAgendamiento()
+    },
+    capturando_numero_documento_facturacion: {
+      paso: "capturando_tipo_documento_facturacion",
+      message: construirMensajeTipoDocumentoFacturacionAgendamiento()
+    },
+    capturando_correo_facturacion: {
+      paso: "capturando_numero_documento_facturacion",
+      message: construirMensajeNumeroDocumentoFacturacionAgendamiento(sesion?.billingDocType)
+    },
+    capturando_pais_celular_facturacion: {
+      paso: "capturando_correo_facturacion",
+      message: construirMensajeCorreoFacturacionAgendamiento()
+    },
+    capturando_celular_facturacion: {
+      paso: "capturando_pais_celular_facturacion",
+      message: construirMensajePaisCelularFacturacionAgendamiento()
+    },
+    capturando_direccion_facturacion: {
+      paso: "capturando_celular_facturacion",
+      message: construirMensajeCelularFacturacionAgendamiento(sesion?.billingPhoneCountry)
+    },
+    facturacion_datos_completos: {
+      paso: "capturando_direccion_facturacion",
+      message: construirMensajeDireccionFacturacionAgendamiento()
     }
   };
+
+  if (sesion?.paso === "capturando_nombre_facturacion") {
+    const pacienteMenorEdad = sesion.patientIsMinor ?? esPacienteMenorEdadAgendamiento(sesion.patientDob);
+    const pasoAnterior = pacienteMenorEdad
+      ? {
+        paso: "capturando_comentario_paciente",
+        message: construirMensajeComentarioPacienteAgendamiento()
+      }
+      : {
+        paso: "confirmando_facturacion_mismos_datos",
+        message: construirMensajeFacturacionMismosDatosAgendamiento()
+      };
+
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: pasoAnterior.paso,
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacion(to, pasoAnterior.message);
+    return;
+  }
 
   const pasoPacienteAnterior = pasosPacienteAnteriores[sesion?.paso];
 
@@ -6623,6 +6998,179 @@ function normalizarNotasPacienteAgendamiento(text) {
   }
 
   return value;
+}
+
+function esPacienteMenorEdadAgendamiento(patientDob, fechaActual = new Date()) {
+  const match = String(patientDob || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!match) {
+    return false;
+  }
+
+  const [, anio, mes, dia] = match;
+  let edad = fechaActual.getFullYear() - Number(anio);
+  const mesActual = fechaActual.getMonth() + 1;
+  const diaActual = fechaActual.getDate();
+
+  if (mesActual < Number(mes) || (mesActual === Number(mes) && diaActual < Number(dia))) {
+    edad -= 1;
+  }
+
+  return edad < 18;
+}
+
+function construirMensajeFacturacionMismosDatosAgendamiento() {
+  return `Datos de facturación
+
+¿Deseas usar los mismos datos del paciente para la facturación?
+
+1. Sí
+2. No
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeNombreFacturacionAgendamiento() {
+  return `Por favor escribe el nombre completo o razón social para la facturación.
+Ejemplo: María José Pérez González`;
+}
+
+function construirMensajeNombreFacturacionMenorAgendamiento() {
+  return `Datos de facturación
+
+Para menores de edad, la facturación debe registrarse a nombre del representante.
+
+${construirMensajeNombreFacturacionAgendamiento()}`;
+}
+
+function construirMensajeTipoDocumentoFacturacionAgendamiento() {
+  return `Selecciona el tipo de documento para la facturación:
+
+1. Cédula (Ecuador)
+2. RUC (Ecuador)
+3. Pasaporte (Extranjero)
+
+Para personas ecuatorianas se admite cédula o RUC. Para personas extranjeras, pasaporte.
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeNumeroDocumentoFacturacionAgendamiento(tipo) {
+  if (tipo === "ruc") {
+    return `Escribe el RUC para la facturación.
+Debe tener exactamente 13 dígitos.
+Ejemplo: 0912345678001`;
+  }
+
+  if (tipo === "pasaporte") {
+    return `Escribe el número de pasaporte para la facturación.
+Debe tener al menos 5 caracteres.
+Ejemplo: A1234567`;
+  }
+
+  return `Escribe el número de cédula para la facturación.
+Debe tener exactamente 10 dígitos.
+Ejemplo: 0912345678`;
+}
+
+function construirMensajeCorreoFacturacionAgendamiento() {
+  return `Escribe el correo electrónico para la facturación.
+Ejemplo: paciente@gmail.com`;
+}
+
+function construirMensajePaisCelularFacturacionAgendamiento() {
+  return `Selecciona el país del número celular para la facturación:
+
+1. Ecuador 🇪🇨
+2. Otro país
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeCelularFacturacionAgendamiento(country) {
+  if (country === "OTHER") {
+    return `Escribe el número celular de facturación con código de país.
+Ejemplo: +573001234567`;
+  }
+
+  return `Escribe el número celular de Ecuador para facturación sin el 0 inicial.
+Ejemplo: 987654321`;
+}
+
+function construirMensajeDireccionFacturacionAgendamiento() {
+  return `Escribe la dirección para la facturación.
+Ejemplo: Av. Quito y Primero de Mayo`;
+}
+
+function construirMensajeFacturacionCompletaAgendamiento() {
+  return `Gracias. Ya registramos tus datos de facturación.
+
+El siguiente paso será aceptar el consentimiento para continuar con la cita.`;
+}
+
+function normalizarRespuestaSiNoAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+
+  if (indice === 0) {
+    return true;
+  }
+
+  if (indice === 1) {
+    return false;
+  }
+
+  return null;
+}
+
+function validarNombreFacturacionAgendamiento(text) {
+  const value = String(text || "").trim().replace(/\s+/g, " ");
+
+  if (value.length < 5) {
+    return null;
+  }
+
+  if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizarTipoDocumentoFacturacionAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+
+  if (indice === 0) {
+    return "cedula";
+  }
+
+  if (indice === 1) {
+    return "ruc";
+  }
+
+  if (indice === 2) {
+    return "pasaporte";
+  }
+
+  return null;
+}
+
+function validarDocumentoFacturacionAgendamiento(text, tipo) {
+  const value = String(text || "").trim();
+
+  if (tipo === "cedula") {
+    return /^\d{10}$/.test(value) ? value : null;
+  }
+
+  if (tipo === "ruc") {
+    return /^\d{13}$/.test(value) ? value : null;
+  }
+
+  if (tipo === "pasaporte") {
+    const normalizado = value.replace(/\s+/g, " ");
+    return normalizado.length >= 5 ? normalizado : null;
+  }
+
+  return null;
 }
 
 function construirNotaZonaHorariaAgendamiento(sesion) {
