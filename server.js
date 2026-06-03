@@ -3050,7 +3050,7 @@ ${appointmentTimeLabel}
 
 Reservamos temporalmente este turno durante 20 minutos.
 
-Ahora necesitamos tus datos para completar la cita.
+Ahora necesitamos los datos del paciente para completar la cita.
 
 ${construirMensajeNombrePacienteAgendamiento()}`
   );
@@ -6793,17 +6793,17 @@ Ejemplo: 1`;
 }
 
 function construirMensajeNombrePacienteAgendamiento() {
-  return `Por favor escribe tu nombre completo.
+  return `Por favor escribe el nombre completo del paciente.
 Ejemplo: María José Pérez González`;
 }
 
 function construirMensajeFechaNacimientoPacienteAgendamiento() {
-  return `Escribe tu fecha de nacimiento en formato DD/MM/AAAA.
+  return `Escribe la fecha de nacimiento del paciente en formato DD/MM/AAAA.
 Ejemplo: 25/08/1990`;
 }
 
 function construirMensajeTipoDocumentoPacienteAgendamiento() {
-  return `Selecciona tu tipo de documento:
+  return `Selecciona el tipo de documento del paciente:
 
 1. Cédula (Ecuador)
 2. Pasaporte (Extranjero)
@@ -6815,23 +6815,23 @@ Responde con el número de la opción.`;
 
 function construirMensajeNumeroDocumentoPacienteAgendamiento(tipoDocumento) {
   if (tipoDocumento === "pasaporte") {
-    return `Escribe tu número de pasaporte.
+    return `Escribe el número de pasaporte del paciente.
 Debe tener al menos 5 caracteres.
 Ejemplo: A1234567`;
   }
 
-  return `Escribe tu número de cédula.
+  return `Escribe el número de cédula del paciente.
 Debe tener exactamente 10 dígitos.
 Ejemplo: 0912345678`;
 }
 
 function construirMensajeCorreoPacienteAgendamiento() {
-  return `Escribe tu correo electrónico.
+  return `Escribe el correo electrónico del paciente.
 Ejemplo: paciente@gmail.com`;
 }
 
 function construirMensajePaisCelularPacienteAgendamiento() {
-  return `Selecciona el país de tu número celular:
+  return `Selecciona el país del número celular del paciente:
 
 1. Ecuador 🇪🇨
 2. Otro país
@@ -6841,23 +6841,23 @@ Responde con el número de la opción.`;
 
 function construirMensajeCelularPacienteAgendamiento(patientPhoneCountry) {
   if (patientPhoneCountry === "OTHER") {
-    return `Escribe tu número celular con código de país.
+    return `Escribe el número celular del paciente con código de país.
 Ejemplo: +573001234567`;
   }
 
-  return `Escribe tu número celular de Ecuador sin el 0 inicial.
+  return `Escribe el número celular del paciente en Ecuador sin el 0 inicial.
 Ejemplo: 987654321`;
 }
 
 function construirMensajeDireccionPacienteAgendamiento() {
-  return `Escribe tu dirección.
+  return `Escribe la dirección del paciente.
 Ejemplo: Av. Quito y Primero de Mayo`;
 }
 
 function construirMensajeComentarioPacienteAgendamiento() {
-  return `¿Deseas agregar algún comentario para tu cita?
+  return `¿Deseas agregar algún comentario para la cita del paciente?
 
-Puedes escribir tu comentario o responder "omitir" para dejarlo vacío.`;
+Puedes escribir el comentario o responder "omitir" para dejarlo vacío.`;
 }
 
 function validarNombrePacienteAgendamiento(text) {
@@ -8232,33 +8232,64 @@ async function enviarWhatsApp(payload) {
     type: payload.type
   });
 
-  try {
-    console.log("[WHATSAPP] Antes await axios.post /messages:", {
-      to: payload.to,
-      type: payload.type,
-      timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS
-    });
-    const response = await axios.post(url, payload, {
-      timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      console.log("[WHATSAPP] Antes await axios.post /messages:", {
+        to: payload.to,
+        type: payload.type,
+        timeoutMs: WHATSAPP_REQUEST_TIMEOUT_MS,
+        attempt,
+        maxAttempts
+      });
+      const response = await axios.post(url, payload, {
+        timeout: WHATSAPP_REQUEST_TIMEOUT_MS,
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      });
+      console.log("[WHATSAPP] Despues await axios.post /messages:", {
+        to: payload.to,
+        type: payload.type,
+        status: response.status,
+        attempt,
+        maxAttempts
+      });
+      return;
+    } catch (error) {
+      const puedeReintentar = attempt < maxAttempts && esErrorTransitorioWhatsApp(error);
+
+      if (puedeReintentar) {
+        console.warn("[WHATSAPP] Reintentando envio por error transitorio:", {
+          to: payload.to,
+          type: payload.type,
+          code: error.code,
+          attempt,
+          maxAttempts
+        });
+        await esperar(750);
+        continue;
       }
-    });
-    console.log("[WHATSAPP] Despues await axios.post /messages:", {
-      to: payload.to,
-      type: payload.type,
-      status: response.status
-    });
-  } catch (error) {
-    console.error("[WHATSAPP] Error en axios.post /messages:", {
-      to: payload.to,
-      type: payload.type,
-      code: error.code,
-      error: error.response?.data || error.message
-    });
-    throw error;
+
+      console.error("[WHATSAPP] Error en axios.post /messages:", {
+        to: payload.to,
+        type: payload.type,
+        code: error.code,
+        error: error.response?.data || error.message
+      });
+      throw error;
+    }
   }
+}
+
+function esErrorTransitorioWhatsApp(error) {
+  return !error?.response && ["ETIMEDOUT", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN"].includes(error?.code);
+}
+
+function esperar(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function fechaPersistidaAMs(value, fallback = Date.now()) {
