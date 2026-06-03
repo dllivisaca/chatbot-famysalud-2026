@@ -2371,6 +2371,11 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
     return;
   }
 
+  if (sesion.paso === "capturando_pais_celular_paciente") {
+    await manejarPaisCelularPacienteAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
   if (sesion.paso === "capturando_celular_paciente") {
     await manejarCelularPacienteAgendamiento(from, text, messageId, sesion);
     return;
@@ -3155,18 +3160,56 @@ ${construirMensajeCorreoPacienteAgendamiento()}`
 
   guardarSesionAgendamiento(from, {
     ...sesion,
-    paso: "capturando_celular_paciente",
+    paso: "capturando_pais_celular_paciente",
     patientEmail,
+    patientPhoneCountry: null,
+    patientPhone: null,
     timestamp: Date.now()
   });
 
-  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeCelularPacienteAgendamiento());
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajePaisCelularPacienteAgendamiento());
+}
+
+async function manejarPaisCelularPacienteAgendamiento(from, text, messageId, sesion) {
+  const patientPhoneCountry = normalizarPaisCelularPacienteAgendamiento(text);
+
+  if (!patientPhoneCountry) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_datos_paciente",
+      payload: {
+        reason: "invalid_patient_phone_country"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No encontré ese país para el número celular.
+
+${construirMensajePaisCelularPacienteAgendamiento()}`
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "capturando_celular_paciente",
+    patientPhoneCountry,
+    patientPhone: null,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeCelularPacienteAgendamiento(patientPhoneCountry));
 }
 
 async function manejarCelularPacienteAgendamiento(from, text, messageId, sesion) {
-  const patientPhone = normalizarCelularPacienteEcuadorAgendamiento(text);
+  const patientPhone = normalizarCelularPacienteAgendamiento(text, sesion.patientPhoneCountry);
 
   if (!patientPhone) {
+    const detalleError = sesion.patientPhoneCountry === "OTHER"
+      ? "Escríbelo con código de país, sin letras y con 8 a 15 dígitos."
+      : "Escríbelo sin el 0 inicial y con 9 dígitos.";
+
     registrarEvento(from, "invalid_message", {
       messageId,
       flowKey: "agendamiento_datos_paciente",
@@ -3177,9 +3220,9 @@ async function manejarCelularPacienteAgendamiento(from, text, messageId, sesion)
 
     await enviarMensajeAgendamientoConNavegacion(
       from,
-      `No pude validar ese celular. Escríbelo sin el 0 inicial y con 9 dígitos.
+      `No pude validar ese celular. ${detalleError}
 
-${construirMensajeCelularPacienteAgendamiento()}`
+${construirMensajeCelularPacienteAgendamiento(sesion.patientPhoneCountry)}`
     );
     return;
   }
@@ -3281,13 +3324,17 @@ async function volverAgendamiento(to, messageId) {
       paso: "capturando_numero_documento_paciente",
       message: construirMensajeNumeroDocumentoPacienteAgendamiento(sesion?.patientDocType)
     },
-    capturando_celular_paciente: {
+    capturando_pais_celular_paciente: {
       paso: "capturando_correo_paciente",
       message: construirMensajeCorreoPacienteAgendamiento()
     },
+    capturando_celular_paciente: {
+      paso: "capturando_pais_celular_paciente",
+      message: construirMensajePaisCelularPacienteAgendamiento()
+    },
     capturando_direccion_paciente: {
       paso: "capturando_celular_paciente",
-      message: construirMensajeCelularPacienteAgendamiento()
+      message: construirMensajeCelularPacienteAgendamiento(sesion?.patientPhoneCountry)
     },
     capturando_comentario_paciente: {
       paso: "capturando_direccion_paciente",
@@ -6383,8 +6430,10 @@ Ejemplo: 25/08/1990`;
 function construirMensajeTipoDocumentoPacienteAgendamiento() {
   return `Selecciona tu tipo de documento:
 
-1. Cédula
-2. Pasaporte
+1. Cédula (Ecuador)
+2. Pasaporte (Extranjero)
+
+Para personas con nacionalidad ecuatoriana, elige cédula. Para personas extranjeras, elige pasaporte.
 
 Responde con el número de la opción.`;
 }
@@ -6392,7 +6441,7 @@ Responde con el número de la opción.`;
 function construirMensajeNumeroDocumentoPacienteAgendamiento(tipoDocumento) {
   if (tipoDocumento === "pasaporte") {
     return `Escribe tu número de pasaporte.
-Debe tener entre 6 y 15 caracteres, sin espacios.
+Debe tener al menos 5 caracteres.
 Ejemplo: A1234567`;
   }
 
@@ -6406,7 +6455,21 @@ function construirMensajeCorreoPacienteAgendamiento() {
 Ejemplo: paciente@gmail.com`;
 }
 
-function construirMensajeCelularPacienteAgendamiento() {
+function construirMensajePaisCelularPacienteAgendamiento() {
+  return `Selecciona el país de tu número celular:
+
+1. Ecuador 🇪🇨
+2. Otro país
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeCelularPacienteAgendamiento(patientPhoneCountry) {
+  if (patientPhoneCountry === "OTHER") {
+    return `Escribe tu número celular con código de país.
+Ejemplo: +573001234567`;
+  }
+
   return `Escribe tu número celular de Ecuador sin el 0 inicial.
 Ejemplo: 987654321`;
 }
@@ -6483,7 +6546,8 @@ function validarDocumentoPacienteAgendamiento(text, tipo) {
   }
 
   if (tipo === "pasaporte") {
-    return /^[A-Za-z0-9]{6,15}$/.test(value) ? value.toUpperCase() : null;
+    const normalizado = value.replace(/\s+/g, " ");
+    return normalizado.length >= 5 ? normalizado : null;
   }
 
   return null;
@@ -6499,8 +6563,36 @@ function validarCorreoPacienteAgendamiento(text) {
   return value;
 }
 
-function normalizarCelularPacienteEcuadorAgendamiento(text) {
+function normalizarPaisCelularPacienteAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+
+  if (indice === 0) {
+    return "EC";
+  }
+
+  if (indice === 1) {
+    return "OTHER";
+  }
+
+  return null;
+}
+
+function normalizarCelularPacienteAgendamiento(text, patientPhoneCountry) {
   const digits = String(text || "").replace(/\D/g, "");
+
+  if (patientPhoneCountry === "OTHER") {
+    const value = String(text || "").trim();
+
+    if (/[A-Za-z]/.test(value) || !/^\+?[\d\s().-]+$/.test(value)) {
+      return null;
+    }
+
+    if (!/^\d{8,15}$/.test(digits)) {
+      return null;
+    }
+
+    return `+${digits}`;
+  }
 
   if (!/^\d{9}$/.test(digits)) {
     return null;
