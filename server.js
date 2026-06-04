@@ -79,6 +79,7 @@ const CATALOG_CACHE_DIR = path.join(__dirname, "data");
 const CATALOG_CACHE_FILE = path.join(CATALOG_CACHE_DIR, "catalogo-servicios.json");
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
 const AGENDAMIENTO_HOLD_TTL_MS = 20 * 60 * 1000;
+const TRANSFER_RECEIPT_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
 const PROMOCIONES_URL = "https://famysalud.com.ec/promociones";
@@ -2527,6 +2528,14 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
     return;
   }
 
+  if (sesion.paso === "cita_transferencia_registrada") {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion)
+    );
+    return;
+  }
+
   if (sesion.paso === "metodo_pago_seleccionado") {
     await enviarMensajeAgendamientoConNavegacion(
       from,
@@ -4119,10 +4128,164 @@ async function manejarTerminosTransferenciaAgendamiento(from, text, messageId, s
     }
   });
 
-  await enviarMensajeAgendamientoConNavegacion(
-    from,
-    construirMensajeTransferenciaPendienteRegistroAgendamiento()
-  );
+  await registrarCitaTransferenciaAgendamiento(from, transferenciaCompleta, messageId);
+}
+
+async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = null) {
+  const erroresSesion = validarSesionTransferenciaListaParaRegistroAgendamiento(sesion);
+
+  if (erroresSesion.length) {
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] Datos incompletos antes de registrar:", {
+      missing: erroresSesion,
+      professionalId: sesion?.professionalId || null,
+      serviceId: sesion?.serviceId || null,
+      appointmentDate: sesion?.appointmentDate || null
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude registrar la cita porque falta información obligatoria de la transferencia o del turno. Por favor vuelve atrás y revisa los datos."
+    );
+    return;
+  }
+
+  if (!APPWEB_CHATBOT_API_KEY) {
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] Falta APPWEB_CHATBOT_API_KEY para registrar transferencia.");
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeTransferenciaPendienteRegistroAgendamiento()
+    );
+    return;
+  }
+
+  let comprobante;
+
+  try {
+    comprobante = await descargarComprobanteTransferenciaWhatsApp(sesion.transferReceipt);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] No se pudo descargar comprobante:", {
+      error: error.message,
+      mediaIdPresent: Boolean(sesion?.transferReceipt?.mediaId)
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude descargar el comprobante de transferencia desde WhatsApp. Por favor intenta enviarlo nuevamente o contacta a un asesor."
+    );
+    return;
+  }
+
+  try {
+    console.log("[AGENDAMIENTO_TRANSFERENCIA] Registrando cita en Laravel:", {
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate,
+      appointmentTime: sesion.appointmentTime,
+      receiptBytes: comprobante.size
+    });
+
+    const response = await enviarRegistroTransferenciaLaravel(sesion, comprobante);
+
+    if (response.status === 201) {
+      const bookingId = obtenerBookingIdRespuestaTransferencia(response.data);
+      const sesionRegistrada = {
+        ...sesion,
+        paso: "cita_transferencia_registrada",
+        bookingId,
+        bookingResponse: {
+          status: response.status,
+          bookingId
+        },
+        timestamp: Date.now()
+      };
+
+      guardarSesionAgendamiento(from, sesionRegistrada);
+
+      registrarEvento(from, "flow_completed", {
+        messageId,
+        flowKey: "agendamiento_transferencia",
+        payload: {
+          action: "transfer_booking_registered",
+          bookingId: bookingId || null
+        }
+      });
+
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        construirMensajeCitaTransferenciaRegistradaAgendamiento(sesionRegistrada)
+      );
+      return;
+    }
+
+    if (response.status === 409) {
+      console.warn("[AGENDAMIENTO_TRANSFERENCIA] Turno no disponible al registrar:", {
+        professionalId: sesion.professionalId,
+        serviceId: sesion.serviceId,
+        appointmentDate: sesion.appointmentDate,
+        appointmentTime: sesion.appointmentTime
+      });
+
+      const sesionReintento = {
+        ...sesion,
+        paso: "seleccionando_fecha",
+        appointmentDate: null,
+        appointmentDateLabel: null,
+        appointmentTime: null,
+        appointmentEndTime: null,
+        appointmentTimeLabel: null,
+        horariosDisponibles: [],
+        appointmentHoldId: null,
+        appointmentHoldExpiresAt: null,
+        timestamp: Date.now()
+      };
+
+      guardarSesionAgendamiento(from, sesionReintento);
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        "Ese turno ya no está disponible. Te mostraré nuevamente las fechas para elegir otro horario."
+      );
+      await iniciarSeleccionFechaAgendamiento(from, sesionReintento);
+      return;
+    }
+
+    if (response.status === 422) {
+      console.warn("[AGENDAMIENTO_TRANSFERENCIA] Laravel rechazó validación:", {
+        errors: response.data?.errors || response.data?.message || null,
+        professionalId: sesion.professionalId,
+        serviceId: sesion.serviceId
+      });
+
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        "Hubo un problema validando la información de la cita o la transferencia. Por favor revisa los datos ingresados o contacta a un asesor."
+      );
+      return;
+    }
+
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] Respuesta inesperada de Laravel:", {
+      status: response.status,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pude completar el registro de la cita en este momento. Por favor intenta nuevamente o contacta a un asesor."
+    );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] Error temporal registrando cita:", {
+      status: error.response?.status || null,
+      code: error.code || null,
+      message: error.message,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "Tenemos un problema temporal registrando la cita. Por favor intenta nuevamente o contacta a un asesor."
+    );
+  }
 }
 
 async function volverAgendamiento(to, messageId) {
@@ -7941,7 +8104,19 @@ Responde con el número de la opción.`;
 function construirMensajeTransferenciaPendienteRegistroAgendamiento() {
   return `Datos de transferencia recibidos.
 
-El flujo queda listo en estado transferencia_completa_pendiente_registro. Falta conectar el registro final de la cita con transferencia en la BD/Laravel para completar el agendamiento real.`;
+El flujo queda listo en estado transferencia_completa_pendiente_registro. Falta configurar o completar la conexión con el registro final de la cita con transferencia en Laravel.`;
+}
+
+function construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion) {
+  const codigoReserva = sesion?.bookingId
+    ? `\n\nCódigo de reserva: ${sesion.bookingId}`
+    : "";
+
+  return `Tu cita fue registrada correctamente.
+
+El comprobante de transferencia quedó pendiente de validación por nuestro equipo.${codigoReserva}
+
+Te contactaremos si necesitamos confirmar algún dato adicional.`;
 }
 
 async function enviarTerminosTransferenciaAgendamiento(to) {
@@ -7965,6 +8140,192 @@ function normalizarBancoOrigenTransferenciaAgendamiento(text) {
 function validarBancoOrigenPersonalizadoTransferenciaAgendamiento(text) {
   const value = String(text || "").trim().replace(/\s+/g, " ");
   return value ? value : null;
+}
+
+function validarSesionTransferenciaListaParaRegistroAgendamiento(sesion) {
+  const required = {
+    professionalId: sesion?.professionalId,
+    serviceId: sesion?.serviceId,
+    appointmentDate: sesion?.appointmentDate,
+    appointmentTime: sesion?.appointmentTime,
+    appointmentEndTime: sesion?.appointmentEndTime,
+    appointmentMode: sesion?.appointmentMode,
+    patientFullName: sesion?.patientFullName,
+    patientEmail: sesion?.patientEmail,
+    patientPhone: sesion?.patientPhone,
+    paymentAmount: sesion?.paymentAmount,
+    paymentAmountStandard: sesion?.paymentAmountStandard,
+    paymentDiscountAmount: sesion?.paymentDiscountAmount,
+    transferOriginBank: sesion?.transferOriginBank,
+    transferPayerName: sesion?.transferPayerName,
+    transferDate: sesion?.transferDate,
+    transferReference: sesion?.transferReference,
+    transferReceiptMediaId: sesion?.transferReceipt?.mediaId
+  };
+  const missing = Object.entries(required)
+    .filter(([, value]) => value === null || value === undefined || value === "")
+    .map(([key]) => key);
+
+  if (sesion?.transferTermsAccepted !== true) {
+    missing.push("transferTermsAccepted");
+  }
+
+  if (sesion?.dataConsent !== true) {
+    missing.push("dataConsent");
+  }
+
+  if (!Number.isFinite(Number(sesion?.paymentAmount)) || Number(sesion.paymentAmount) <= 0) {
+    missing.push("paymentAmountValid");
+  }
+
+  return missing;
+}
+
+async function descargarComprobanteTransferenciaWhatsApp(transferReceipt) {
+  if (!transferReceipt?.mediaId) {
+    throw new Error("Comprobante sin mediaId.");
+  }
+
+  if (!WHATSAPP_TOKEN) {
+    throw new Error("WHATSAPP_TOKEN no está configurado.");
+  }
+
+  const mediaUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${transferReceipt.mediaId}`;
+  const metadata = await axios.get(mediaUrl, {
+    timeout: 10000,
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`
+    }
+  });
+  const downloadUrl = metadata.data?.url;
+
+  if (!downloadUrl) {
+    throw new Error("No se recibió URL de descarga de media.");
+  }
+
+  const contentLength = Number.parseInt(metadata.data?.file_size || metadata.data?.fileSize || "0", 10);
+
+  if (Number.isFinite(contentLength) && contentLength > TRANSFER_RECEIPT_MAX_BYTES) {
+    throw new Error("El comprobante supera el tamaño máximo permitido de 5MB.");
+  }
+
+  const archivo = await axios.get(downloadUrl, {
+    timeout: 15000,
+    responseType: "arraybuffer",
+    maxContentLength: TRANSFER_RECEIPT_MAX_BYTES,
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`
+    }
+  });
+  const buffer = Buffer.from(archivo.data);
+
+  if (buffer.length > TRANSFER_RECEIPT_MAX_BYTES) {
+    throw new Error("El comprobante supera el tamaño máximo permitido de 5MB.");
+  }
+
+  const mimeType = transferReceipt.mimeType || metadata.data?.mime_type || archivo.headers["content-type"] || "application/octet-stream";
+  const filename = construirFilenameComprobanteTransferencia(transferReceipt.filename, mimeType);
+
+  if (!comprobanteTransferenciaPermitido({ mimeType, filename })) {
+    throw new Error("Formato de comprobante no permitido.");
+  }
+
+  return {
+    buffer,
+    mimeType,
+    filename,
+    size: buffer.length
+  };
+}
+
+function construirFilenameComprobanteTransferencia(filename, mimeType) {
+  const fallback = `comprobante-transferencia.${extensionPorMimeType(mimeType)}`;
+  return sanitizarNombreArchivoProveedor(filename || fallback);
+}
+
+async function enviarRegistroTransferenciaLaravel(sesion, comprobante) {
+  if (typeof FormData === "undefined" || typeof Blob === "undefined") {
+    throw new Error("FormData o Blob no están disponibles en esta versión de Node.js.");
+  }
+
+  const formData = new FormData();
+  const campos = construirCamposRegistroTransferenciaAgendamiento(sesion);
+
+  for (const [key, value] of Object.entries(campos)) {
+    agregarCampoFormDataSiExiste(formData, key, value);
+  }
+
+  formData.append(
+    "tr_file",
+    new Blob([comprobante.buffer], { type: comprobante.mimeType }),
+    comprobante.filename
+  );
+
+  const url = construirAppWebApiUrl("/api/chatbot/bookings/transfer");
+
+  return axios.post(url, formData, {
+    timeout: 20000,
+    maxBodyLength: TRANSFER_RECEIPT_MAX_BYTES + (1024 * 1024),
+    validateStatus: () => true,
+    headers: {
+      "X-Chatbot-Api-Key": APPWEB_CHATBOT_API_KEY
+    }
+  });
+}
+
+function construirCamposRegistroTransferenciaAgendamiento(sesion) {
+  return {
+    employee_id: sesion.professionalId,
+    service_id: sesion.serviceId,
+    appointment_date: sesion.appointmentDate,
+    appointment_time: sesion.appointmentTime,
+    appointment_end_time: sesion.appointmentEndTime,
+    appointment_mode: sesion.appointmentMode,
+    patient_full_name: sesion.patientFullName,
+    patient_email: sesion.patientEmail,
+    patient_phone: sesion.patientPhone,
+    amount: sesion.paymentAmount,
+    amount_standard: sesion.paymentAmountStandard,
+    discount_amount: sesion.paymentDiscountAmount,
+    payment_method: "transfer",
+    status: "pending_verification",
+    data_consent: "1",
+    transfer_bank_origin: sesion.transferOriginBank,
+    transfer_payer_name: sesion.transferPayerName,
+    transfer_date: sesion.transferDate,
+    transfer_reference: sesion.transferReference,
+    patient_timezone: sesion.patientTimezone,
+    patient_timezone_label: sesion.patientTimezoneLabel,
+    patient_doc_type: sesion.patientDocType,
+    patient_doc_number: sesion.patientDocNumber,
+    patient_address: sesion.patientAddress,
+    patient_dob: sesion.patientDob,
+    patient_notes: sesion.patientNotes,
+    billing_name: sesion.billingName,
+    billing_doc_type: sesion.billingDocType,
+    billing_doc_number: sesion.billingDocNumber,
+    billing_address: sesion.billingAddress,
+    billing_email: sesion.billingEmail,
+    billing_phone: sesion.billingPhone
+  };
+}
+
+function agregarCampoFormDataSiExiste(formData, key, value) {
+  if (value === null || value === undefined || value === "") {
+    return;
+  }
+
+  formData.append(key, String(value));
+}
+
+function obtenerBookingIdRespuestaTransferencia(data) {
+  return data?.booking_id
+    || data?.bookingId
+    || data?.data?.booking_id
+    || data?.data?.bookingId
+    || data?.id
+    || data?.data?.id
+    || null;
 }
 
 function validarTitularTransferenciaAgendamiento(text) {
