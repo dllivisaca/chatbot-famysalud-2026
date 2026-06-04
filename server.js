@@ -2405,15 +2405,15 @@ async function enviarOpcionesInicioAgendamiento(to, messageId, buttonId) {
 
   await enviarBotones(
     to,
-    `📅 Agendamiento de citas
+    `📅 ¡Comencemos con tu agendamiento!
 
 Puedes agendar tu cita de forma rápida desde nuestra aplicación web:
 
 🌐 https://app.famysaludec.com
 
-Si prefieres, también puedes completar todo el proceso directamente desde WhatsApp con ayuda de FamyBOT.`,
+También puedes completar el mismo proceso de agendamiento directamente desde WhatsApp, sin necesidad de acceder a la aplicación web.`,
     [
-      boton("paciente_agendar_whatsapp", "Continuar WhatsApp"),
+      boton("paciente_agendar_whatsapp", "Seguir en WhatsApp"),
       botonMenuPrincipal()
     ]
   );
