@@ -89,6 +89,34 @@ const UBICACION_FAMYSALUD = {
   longitude: -79.8918589,
   croquisPath: path.join("assets", "img", "ubicacion-famysalud.png")
 };
+const DATOS_BANCARIOS_TRANSFERENCIA = {
+  banco: "BANCO GUAYAQUIL",
+  tipoCuenta: "Corriente",
+  numeroCuenta: "0017358871",
+  razonSocial: "SELSYS S.A.",
+  ruc: "0992756608001",
+  correo: "centromedicofamysalud@gmail.com",
+  telefono: "0939034743"
+};
+const BANCOS_ORIGEN_TRANSFERENCIA = [
+  "Banco Guayaquil",
+  "Banco Pichincha",
+  "Produbanco",
+  "Banco Bolivariano",
+  "Banco del Pacífico",
+  "Banco Internacional",
+  "Banco del Austro",
+  "Banco Machala",
+  "Banco Solidario",
+  "BanEcuador",
+  "Banco Amazonas",
+  "Banco General Rumiñahui",
+  "Cooperativa de Ahorro y Crédito JEP",
+  "Otro"
+];
+const TEXTO_LEGAL_TRANSFERENCIA = "Al continuar con el proceso, usted acepta que los pagos no son reembolsables. Las citas podrán ser reagendadas según disponibilidad, siempre que se notifique con un mínimo de 4 horas de anticipación al turno agendado. De no realizarse la notificación dentro del tiempo establecido, se aplicará una penalidad del 25% del valor pagado.";
+const BOTON_TRANSFERENCIA_TERMINOS_ACEPTO = "transfer_terms_accept";
+const BOTON_TRANSFERENCIA_TERMINOS_NO_ACEPTO = "transfer_terms_decline";
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const sesionesAgendamiento = new Map();
@@ -694,8 +722,8 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (!buttonId && !listReplyId && estaEnFlujoAgendamiento(from)) {
-      await manejarFlujoAgendamiento(from, rawText, messageId);
+    if (!listReplyId && estaEnFlujoAgendamiento(from) && (!buttonId || esBotonTerminosTransferenciaAgendamiento(buttonId))) {
+      await manejarFlujoAgendamiento(from, rawText, messageId, message, buttonId);
       return res.sendStatus(200);
     }
 
@@ -2303,7 +2331,7 @@ Por ahora no pude cargar las áreas de atención disponibles. Por favor intenta 
   }
 }
 
-async function manejarFlujoAgendamiento(from, text, messageId) {
+async function manejarFlujoAgendamiento(from, text, messageId, message = null, buttonId = "") {
   const sesion = obtenerSesionAgendamiento(from);
 
   if (!sesion) {
@@ -2458,6 +2486,44 @@ async function manejarFlujoAgendamiento(from, text, messageId) {
 
   if (sesion.paso === "seleccionando_metodo_pago") {
     await manejarSeleccionMetodoPagoAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_banco_origen_transferencia") {
+    await manejarBancoOrigenTransferenciaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_titular_transferencia") {
+    await manejarTitularTransferenciaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_fecha_transferencia") {
+    await manejarFechaTransferenciaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_referencia_transferencia") {
+    await manejarReferenciaTransferenciaAgendamiento(from, text, messageId, sesion);
+    return;
+  }
+
+  if (sesion.paso === "capturando_comprobante_transferencia") {
+    await manejarComprobanteTransferenciaAgendamiento(from, text, messageId, sesion, message);
+    return;
+  }
+
+  if (sesion.paso === "aceptando_terminos_transferencia") {
+    await manejarTerminosTransferenciaAgendamiento(from, text, messageId, sesion, buttonId);
+    return;
+  }
+
+  if (sesion.paso === "transferencia_completa_pendiente_registro") {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeTransferenciaPendienteRegistroAgendamiento()
+    );
     return;
   }
 
@@ -3753,21 +3819,309 @@ Responde con el número de la opción.`
 
   const sesionConPago = {
     ...sesion,
-    paso: "metodo_pago_seleccionado",
+    paso: paymentMethod === "transfer" ? "capturando_banco_origen_transferencia" : "metodo_pago_seleccionado",
     paymentMethod,
     paymentAmount: paymentMethod === "transfer" ? figuras.transfer : figuras.standard,
     paymentAmountStandard: figuras.standard,
     paymentDiscountAmount: figuras.discount,
+    transferOriginBank: paymentMethod === "transfer" ? null : sesion.transferOriginBank,
+    transferPayerName: paymentMethod === "transfer" ? null : sesion.transferPayerName,
+    transferDate: paymentMethod === "transfer" ? null : sesion.transferDate,
+    transferReference: paymentMethod === "transfer" ? null : sesion.transferReference,
+    transferReceipt: paymentMethod === "transfer" ? null : sesion.transferReceipt,
+    transferTermsAccepted: paymentMethod === "transfer" ? false : sesion.transferTermsAccepted,
+    transferOriginBankRequiresCustom: false,
     timestamp: Date.now()
   };
 
   guardarSesionAgendamiento(from, sesionConPago);
 
-  const mensajeSeleccionado = construirMensajeMetodoPagoSeleccionadoAgendamiento(sesionConPago);
+  const mensajeSeleccionado = paymentMethod === "transfer"
+    ? construirMensajeInicioTransferenciaAgendamiento(sesionConPago)
+    : construirMensajeMetodoPagoSeleccionadoAgendamiento(sesionConPago);
 
   await enviarMensajeAgendamientoConNavegacion(
     from,
     mensajeSeleccionado || "El siguiente paso del agendamiento será continuar con el pago."
+  );
+}
+
+async function manejarBancoOrigenTransferenciaAgendamiento(from, text, messageId, sesion) {
+  if (sesion.transferOriginBankRequiresCustom) {
+    const transferOriginBank = validarBancoOrigenPersonalizadoTransferenciaAgendamiento(text);
+
+    if (!transferOriginBank) {
+      registrarEvento(from, "invalid_message", {
+        messageId,
+        flowKey: "agendamiento_transferencia",
+        payload: {
+          reason: "invalid_transfer_origin_bank_custom"
+        }
+      });
+
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        construirMensajeBancoOrigenPersonalizadoTransferenciaAgendamiento()
+      );
+      return;
+    }
+
+    const siguienteSesion = {
+      ...sesion,
+      paso: "capturando_titular_transferencia",
+      transferOriginBank,
+      transferOriginBankRequiresCustom: false,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(from, siguienteSesion);
+    await enviarMensajeAgendamientoConNavegacion(from, construirMensajeTitularTransferenciaAgendamiento());
+    return;
+  }
+
+  const seleccionBanco = normalizarBancoOrigenTransferenciaAgendamiento(text);
+
+  if (!seleccionBanco) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "invalid_transfer_origin_bank"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeBancoOrigenTransferenciaAgendamiento()
+    );
+    return;
+  }
+
+  if (seleccionBanco === "Otro") {
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      transferOriginBank: null,
+      transferOriginBankRequiresCustom: true,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeBancoOrigenPersonalizadoTransferenciaAgendamiento()
+    );
+    return;
+  }
+
+  const siguienteSesion = {
+    ...sesion,
+    paso: "capturando_titular_transferencia",
+    transferOriginBank: seleccionBanco,
+    transferOriginBankRequiresCustom: false,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, siguienteSesion);
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeTitularTransferenciaAgendamiento());
+}
+
+async function manejarTitularTransferenciaAgendamiento(from, text, messageId, sesion) {
+  const transferPayerName = validarTitularTransferenciaAgendamiento(text);
+
+  if (!transferPayerName) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "invalid_transfer_payer_name"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar el titular. Debe tener al menos 5 caracteres y usar solo letras y espacios.
+
+${construirMensajeTitularTransferenciaAgendamiento()}`
+    );
+    return;
+  }
+
+  const siguienteSesion = {
+    ...sesion,
+    paso: "capturando_fecha_transferencia",
+    transferPayerName,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, siguienteSesion);
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeFechaTransferenciaAgendamiento());
+}
+
+async function manejarFechaTransferenciaAgendamiento(from, text, messageId, sesion) {
+  const transferDate = normalizarFechaTransferenciaAgendamiento(text);
+
+  if (!transferDate) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "invalid_transfer_date"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar la fecha de transferencia. Usa dd/mm/aaaa o aaaa-mm-dd.
+
+${construirMensajeFechaTransferenciaAgendamiento()}`
+    );
+    return;
+  }
+
+  const siguienteSesion = {
+    ...sesion,
+    paso: "capturando_referencia_transferencia",
+    transferDate,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, siguienteSesion);
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeReferenciaTransferenciaAgendamiento());
+}
+
+async function manejarReferenciaTransferenciaAgendamiento(from, text, messageId, sesion) {
+  const transferReference = validarReferenciaTransferenciaAgendamiento(text);
+
+  if (!transferReference) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "invalid_transfer_reference"
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `No pude validar la referencia. Debe tener al menos 4 caracteres y no incluir espacios.
+
+${construirMensajeReferenciaTransferenciaAgendamiento()}`
+    );
+    return;
+  }
+
+  const siguienteSesion = {
+    ...sesion,
+    paso: "capturando_comprobante_transferencia",
+    transferReference,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, siguienteSesion);
+  await enviarMensajeAgendamientoConNavegacion(from, construirMensajeComprobanteTransferenciaAgendamiento());
+}
+
+async function manejarComprobanteTransferenciaAgendamiento(from, text, messageId, sesion, message) {
+  const transferReceipt = extraerComprobanteTransferenciaAgendamiento(message);
+
+  if (!transferReceipt) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "missing_transfer_receipt",
+        messageType: message?.type || null
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      `El comprobante es obligatorio. Por favor adjunta una imagen JPG/PNG o un documento PDF.
+
+${construirMensajeComprobanteTransferenciaAgendamiento()}`
+    );
+    return;
+  }
+
+  if (!comprobanteTransferenciaPermitido(transferReceipt)) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "invalid_transfer_receipt_type",
+        mimeType: transferReceipt.mimeType,
+        filename: transferReceipt.filename
+      }
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "El comprobante debe ser JPG, PNG o PDF. Por favor envíalo nuevamente en uno de esos formatos."
+    );
+    return;
+  }
+
+  const siguienteSesion = {
+    ...sesion,
+    paso: "aceptando_terminos_transferencia",
+    transferReceipt,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, siguienteSesion);
+  await enviarTerminosTransferenciaAgendamiento(from);
+}
+
+async function manejarTerminosTransferenciaAgendamiento(from, text, messageId, sesion, buttonId = "") {
+  const transferTermsAccepted = normalizarAceptacionTerminosTransferenciaAgendamiento(buttonId || text);
+
+  if (transferTermsAccepted === null) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_transferencia",
+      payload: {
+        reason: "invalid_transfer_terms_acceptance"
+      }
+    });
+
+    await enviarTerminosTransferenciaAgendamiento(from);
+    return;
+  }
+
+  if (!transferTermsAccepted) {
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      transferTermsAccepted: false,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No podemos continuar con el registro de transferencia sin la aceptación de términos y condiciones."
+    );
+    return;
+  }
+
+  const transferenciaCompleta = {
+    ...sesion,
+    paso: "transferencia_completa_pendiente_registro",
+    transferTermsAccepted: true,
+    timestamp: Date.now()
+  };
+
+  guardarSesionAgendamiento(from, transferenciaCompleta);
+
+  registrarEvento(from, "flow_completed", {
+    messageId,
+    flowKey: "agendamiento_transferencia",
+    payload: {
+      action: "transfer_payment_data_completed",
+      pendingFinalAppointmentRegistration: true
+    }
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    construirMensajeTransferenciaPendienteRegistroAgendamiento()
   );
 }
 
@@ -3860,20 +4214,91 @@ async function volverAgendamiento(to, messageId) {
     seleccionando_metodo_pago: {
       paso: "consentimiento_datos_personales",
       message: construirMensajeConsentimientoDatosPersonalesAgendamiento()
+    },
+    capturando_banco_origen_transferencia: {
+      paso: "seleccionando_metodo_pago",
+      message: null
+    },
+    capturando_titular_transferencia: {
+      paso: "capturando_banco_origen_transferencia",
+      message: construirMensajeBancoOrigenTransferenciaAgendamiento()
+    },
+    capturando_fecha_transferencia: {
+      paso: "capturando_titular_transferencia",
+      message: construirMensajeTitularTransferenciaAgendamiento()
+    },
+    capturando_referencia_transferencia: {
+      paso: "capturando_fecha_transferencia",
+      message: construirMensajeFechaTransferenciaAgendamiento()
+    },
+    capturando_comprobante_transferencia: {
+      paso: "capturando_referencia_transferencia",
+      message: construirMensajeReferenciaTransferenciaAgendamiento()
+    },
+    aceptando_terminos_transferencia: {
+      paso: "capturando_comprobante_transferencia",
+      message: construirMensajeComprobanteTransferenciaAgendamiento()
+    },
+    transferencia_completa_pendiente_registro: {
+      paso: "aceptando_terminos_transferencia",
+      message: null
     }
   };
 
-  if (sesion?.paso === "metodo_pago_seleccionado") {
-    guardarSesionAgendamiento(to, {
+  if (sesion?.paso === "capturando_banco_origen_transferencia") {
+    const sesionMetodoPago = {
       ...sesion,
       paso: "seleccionando_metodo_pago",
       paymentMethod: null,
       paymentAmount: null,
       paymentAmountStandard: null,
       paymentDiscountAmount: null,
+      transferOriginBank: null,
+      transferPayerName: null,
+      transferDate: null,
+      transferReference: null,
+      transferReceipt: null,
+      transferTermsAccepted: null,
+      transferOriginBankRequiresCustom: false,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(to, sesionMetodoPago);
+    await enviarSeleccionMetodoPagoAgendamiento(to, sesionMetodoPago);
+    return;
+  }
+
+  if (sesion?.paso === "transferencia_completa_pendiente_registro") {
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: "aceptando_terminos_transferencia",
+      transferTermsAccepted: false,
       timestamp: Date.now()
     });
-    await enviarSeleccionMetodoPagoAgendamiento(to, sesion);
+    await enviarTerminosTransferenciaAgendamiento(to);
+    return;
+  }
+
+  if (sesion?.paso === "metodo_pago_seleccionado") {
+    const sesionMetodoPago = {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentAmountStandard: null,
+      paymentDiscountAmount: null,
+      transferOriginBank: null,
+      transferPayerName: null,
+      transferDate: null,
+      transferReference: null,
+      transferReceipt: null,
+      transferTermsAccepted: null,
+      transferOriginBankRequiresCustom: false,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(to, sesionMetodoPago);
+    await enviarSeleccionMetodoPagoAgendamiento(to, sesionMetodoPago);
     return;
   }
 
@@ -7355,6 +7780,18 @@ function formatearMontoAgendamiento(value) {
   return Number.isFinite(monto) ? monto.toFixed(2) : "0.00";
 }
 
+function construirTextoDatosBancariosTransferenciaAgendamiento() {
+  return `Datos bancarios del centro médico
+
+Banco: ${DATOS_BANCARIOS_TRANSFERENCIA.banco}
+Tipo de cuenta: ${DATOS_BANCARIOS_TRANSFERENCIA.tipoCuenta}
+Número de cuenta: ${DATOS_BANCARIOS_TRANSFERENCIA.numeroCuenta}
+Razón social: ${DATOS_BANCARIOS_TRANSFERENCIA.razonSocial}
+RUC: ${DATOS_BANCARIOS_TRANSFERENCIA.ruc}
+Correo: ${DATOS_BANCARIOS_TRANSFERENCIA.correo}
+Teléfono: ${DATOS_BANCARIOS_TRANSFERENCIA.telefono}`;
+}
+
 function construirEtiquetaModalidadAgendamiento(appointmentMode) {
   if (appointmentMode === "virtual") {
     return "Virtual";
@@ -7434,6 +7871,200 @@ Pago con tarjeta (precio estándar)
 Total a pagar: $${formatearMontoAgendamiento(figuras.standard)}
 
 El siguiente paso será generar el enlace de pago.`;
+}
+
+function construirMensajeInicioTransferenciaAgendamiento(sesion) {
+  const figuras = calcularFigurasPagoAgendamiento(sesion);
+
+  if (!figuras) {
+    return null;
+  }
+
+  return `Has seleccionado:
+Transferencia bancaria (descuento aplicado)
+
+Total a pagar: $${formatearMontoAgendamiento(figuras.transfer)}
+Descuento aplicado: $${formatearMontoAgendamiento(figuras.discount)}
+
+${construirTextoDatosBancariosTransferenciaAgendamiento()}
+
+Para registrar la transferencia, primero selecciona el banco de origen desde donde realizaste el pago.
+
+${construirMensajeBancoOrigenTransferenciaAgendamiento()}`;
+}
+
+function construirMensajeBancoOrigenTransferenciaAgendamiento() {
+  const listadoBancos = BANCOS_ORIGEN_TRANSFERENCIA
+    .map((banco, index) => `${index + 1}. ${banco}`)
+    .join("\n");
+
+  return `Selecciona el banco de origen:
+
+${listadoBancos}
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeBancoOrigenPersonalizadoTransferenciaAgendamiento() {
+  return "Escribe el nombre del banco o institución financiera desde donde realizaste la transferencia.";
+}
+
+function construirMensajeTitularTransferenciaAgendamiento() {
+  return "Escribe el nombre del titular que realizó el pago.";
+}
+
+function construirMensajeFechaTransferenciaAgendamiento() {
+  return `Escribe la fecha de transferencia.
+Formato permitido: dd/mm/aaaa o aaaa-mm-dd.
+Ejemplo: 04/06/2026`;
+}
+
+function construirMensajeReferenciaTransferenciaAgendamiento() {
+  return "Escribe el número de referencia o comprobante de la transferencia, sin espacios.";
+}
+
+function construirMensajeComprobanteTransferenciaAgendamiento() {
+  return "Adjunta el comprobante de pago en formato JPG, PNG o PDF.";
+}
+
+function construirMensajeTerminosTransferenciaAgendamiento() {
+  return `Términos y condiciones
+
+${TEXTO_LEGAL_TRANSFERENCIA}
+
+1. Acepto
+2. No acepto
+
+Responde con el número de la opción.`;
+}
+
+function construirMensajeTransferenciaPendienteRegistroAgendamiento() {
+  return `Datos de transferencia recibidos.
+
+El flujo queda listo en estado transferencia_completa_pendiente_registro. Falta conectar el registro final de la cita con transferencia en la BD/Laravel para completar el agendamiento real.`;
+}
+
+async function enviarTerminosTransferenciaAgendamiento(to) {
+  await enviarMensajeAgendamientoConNavegacion(to, construirMensajeTerminosTransferenciaAgendamiento());
+}
+
+function esBotonTerminosTransferenciaAgendamiento(buttonId) {
+  return [
+    BOTON_TRANSFERENCIA_TERMINOS_ACEPTO,
+    BOTON_TRANSFERENCIA_TERMINOS_NO_ACEPTO
+  ].includes(buttonId);
+}
+
+function normalizarBancoOrigenTransferenciaAgendamiento(text) {
+  const indice = obtenerIndiceDesdeTexto(String(text || "").trim());
+  return indice !== null && indice >= 0 && indice < BANCOS_ORIGEN_TRANSFERENCIA.length
+    ? BANCOS_ORIGEN_TRANSFERENCIA[indice]
+    : null;
+}
+
+function validarBancoOrigenPersonalizadoTransferenciaAgendamiento(text) {
+  const value = String(text || "").trim().replace(/\s+/g, " ");
+  return value ? value : null;
+}
+
+function validarTitularTransferenciaAgendamiento(text) {
+  const value = String(text || "").trim().replace(/\s+/g, " ");
+
+  if (value.length < 5) {
+    return null;
+  }
+
+  if (!/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]+$/.test(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizarFechaTransferenciaAgendamiento(text) {
+  const value = String(text || "").trim();
+  let dia;
+  let mes;
+  let anio;
+
+  const matchSlash = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  const matchIso = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (matchSlash) {
+    [, dia, mes, anio] = matchSlash;
+  } else if (matchIso) {
+    [, anio, mes, dia] = matchIso;
+  } else {
+    return null;
+  }
+
+  const fecha = new Date(Date.UTC(Number(anio), Number(mes) - 1, Number(dia)));
+
+  if (
+    fecha.getUTCFullYear() !== Number(anio)
+    || fecha.getUTCMonth() !== Number(mes) - 1
+    || fecha.getUTCDate() !== Number(dia)
+  ) {
+    return null;
+  }
+
+  return `${anio}-${mes}-${dia}`;
+}
+
+function validarReferenciaTransferenciaAgendamiento(text) {
+  const value = String(text || "").trim();
+  return /^\S{4,}$/.test(value) ? value : null;
+}
+
+function extraerComprobanteTransferenciaAgendamiento(message) {
+  const tipo = message?.type;
+
+  if (!["image", "document"].includes(tipo)) {
+    return null;
+  }
+
+  const media = message?.[tipo];
+
+  if (!media?.id) {
+    return null;
+  }
+
+  // Pendiente: descargar y persistir el media de WhatsApp cuando exista el helper/integracion final del registro.
+  return {
+    type: tipo,
+    mediaId: media.id,
+    mimeType: media.mime_type || null,
+    filename: media.filename || null,
+    sha256: media.sha256 || null,
+    caption: media.caption || ""
+  };
+}
+
+function comprobanteTransferenciaPermitido(transferReceipt) {
+  const mimeType = String(transferReceipt?.mimeType || "").toLowerCase();
+  const filename = String(transferReceipt?.filename || "").toLowerCase();
+  const extensionValida = /\.(jpe?g|png|pdf)$/.test(filename);
+
+  if (["image/jpeg", "image/png", "application/pdf"].includes(mimeType)) {
+    return true;
+  }
+
+  return extensionValida;
+}
+
+function normalizarAceptacionTerminosTransferenciaAgendamiento(text) {
+  const value = String(text || "").trim().toLowerCase();
+  const indice = obtenerIndiceDesdeTexto(value);
+
+  if (indice === 0) {
+    return true;
+  }
+
+  if (indice === 1) {
+    return false;
+  }
+
+  return null;
 }
 
 function validarNombreFacturacionAgendamiento(text) {
