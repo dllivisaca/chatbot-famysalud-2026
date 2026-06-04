@@ -78,7 +78,7 @@ const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CAT
 const CATALOG_CACHE_DIR = path.join(__dirname, "data");
 const CATALOG_CACHE_FILE = path.join(CATALOG_CACHE_DIR, "catalogo-servicios.json");
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
-const AGENDAMIENTO_HOLD_TTL_MS = 20 * 60 * 1000;
+const AGENDAMIENTO_WHATSAPP_HOLD_TTL_MS = 30 * 60 * 1000;
 const TRANSFER_RECEIPT_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
 const MAX_TITULO_FILA_LISTA = 24;
@@ -2529,10 +2529,7 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
   }
 
   if (sesion.paso === "cita_transferencia_registrada") {
-    await enviarMensajeConMenuPrincipal(
-      from,
-      construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion)
-    );
+    await enviarMensajeFinalCitaTransferenciaRegistradaSeguro(from, sesion);
     return;
   }
 
@@ -3096,7 +3093,7 @@ Ejemplo: 1`
       appointmentMode: sesion.appointmentMode,
       slotStartEc,
       slotEndEc,
-      expiresAtMs: Date.now() + AGENDAMIENTO_HOLD_TTL_MS
+      expiresAtMs: Date.now() + AGENDAMIENTO_WHATSAPP_HOLD_TTL_MS
     });
   } catch (error) {
     console.warn("[AGENDAMIENTO] No se pudo crear hold:", construirDetalleErrorLog(error, {
@@ -3156,7 +3153,7 @@ Ejemplo: 1`
 ${sesion.appointmentDateLabel}
 ${appointmentTimeLabel}
 
-Reservamos temporalmente este turno durante 20 minutos.
+Reservamos temporalmente este turno durante 30 minutos.
 
 Ahora necesitamos los datos del paciente para completar la cita.
 
@@ -4267,6 +4264,24 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
 
     if (response.status === 201) {
       const bookingId = obtenerBookingIdRespuestaTransferencia(response.data);
+      const registroExitoso = obtenerSuccessRespuestaTransferencia(response.data) === true;
+      const holdIdRegistrado = sesion.appointmentHoldId || null;
+
+      if (!registroExitoso || !bookingId) {
+        console.warn("[AGENDAMIENTO_TRANSFERENCIA] Respuesta 201 sin confirmación completa:", {
+          success: registroExitoso,
+          bookingIdPresent: Boolean(bookingId),
+          professionalId: sesion.professionalId,
+          serviceId: sesion.serviceId
+        });
+
+        await enviarMensajeAgendamientoConNavegacion(
+          from,
+          "No pude confirmar el registro de la cita en este momento. Por favor intenta nuevamente o contacta a un asesor."
+        );
+        return;
+      }
+
       const sesionRegistrada = {
         ...sesion,
         paso: "cita_transferencia_registrada",
@@ -4278,8 +4293,14 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
           isOutsideBusinessHours: response.data?.is_outside_business_hours ?? response.data?.data?.is_outside_business_hours ?? false,
           appointment: response.data?.appointment || response.data?.data?.appointment || null
         },
+        appointmentHoldId: null,
+        appointmentHoldExpiresAt: null,
         timestamp: Date.now()
       };
+
+      if (bookingId) {
+        liberarHoldAgendamientoSeguro(from, holdIdRegistrado, obtenerSessionId(from));
+      }
 
       guardarSesionAgendamiento(from, sesionRegistrada);
 
@@ -4292,10 +4313,7 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
         }
       });
 
-      await enviarMensajeConMenuPrincipal(
-        from,
-        construirMensajeCitaTransferenciaRegistradaAgendamiento(sesionRegistrada)
-      );
+      await enviarMensajeFinalCitaTransferenciaRegistradaSeguro(from, sesionRegistrada);
       return;
     }
 
@@ -8288,6 +8306,21 @@ Le enviamos un correo electrónico con el resumen de su cita.
 Recibirá un segundo correo cuando su cita haya sido confirmada.`;
 }
 
+async function enviarMensajeFinalCitaTransferenciaRegistradaSeguro(to, sesion) {
+  const mensaje = construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion);
+  const partes = dividirMensajePorLineas(mensaje);
+
+  for (const parte of partes) {
+    await enviarMensajeTexto(to, parte);
+  }
+
+  await enviarBotones(
+    to,
+    "Puedes volver al menú principal cuando desees.",
+    [botonMenuPrincipal()]
+  );
+}
+
 function construirDetalleCitaTransferenciaRegistradaAgendamiento(sesion) {
   const appointment = sesion?.bookingResponse?.appointment || {};
   const appointmentMode = appointment.appointment_mode || sesion?.appointmentMode || "No especificada";
@@ -8679,6 +8712,10 @@ function obtenerBookingIdRespuestaTransferencia(data) {
     || data?.id
     || data?.data?.id
     || null;
+}
+
+function obtenerSuccessRespuestaTransferencia(data) {
+  return data?.success ?? data?.data?.success ?? false;
 }
 
 function esErrorComprobanteTransferenciaTamano(error) {
