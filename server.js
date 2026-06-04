@@ -4032,6 +4032,14 @@ ${construirMensajeReferenciaTransferenciaAgendamiento()}`
 async function manejarComprobanteTransferenciaAgendamiento(from, text, messageId, sesion, message) {
   const transferReceipt = extraerComprobanteTransferenciaAgendamiento(message);
 
+  console.log("[TRANSFER_RECEIPT_DEBUG] Mensaje recibido para comprobante:", {
+    messageType: message?.type || null,
+    mediaId: transferReceipt?.mediaId || message?.[message?.type]?.id || null,
+    mimeType: transferReceipt?.mimeType || message?.[message?.type]?.mime_type || null,
+    filename: transferReceipt?.filename || message?.[message?.type]?.filename || null,
+    sha256Present: Boolean(transferReceipt?.sha256 || message?.[message?.type]?.sha256)
+  });
+
   if (!transferReceipt) {
     registrarEvento(from, "invalid_message", {
       messageId,
@@ -4052,6 +4060,13 @@ ${construirMensajeComprobanteTransferenciaAgendamiento()}`
   }
 
   if (!comprobanteTransferenciaPermitido(transferReceipt)) {
+    console.warn("[TRANSFER_RECEIPT_DEBUG] Tipo de comprobante no permitido antes de descargar:", {
+      messageType: transferReceipt.type,
+      mediaId: transferReceipt.mediaId,
+      mimeType: transferReceipt.mimeType,
+      filename: transferReceipt.filename
+    });
+
     registrarEvento(from, "invalid_message", {
       messageId,
       flowKey: "agendamiento_transferencia",
@@ -4069,6 +4084,32 @@ ${construirMensajeComprobanteTransferenciaAgendamiento()}`
     return;
   }
 
+  try {
+    await descargarComprobanteTransferenciaWhatsApp(transferReceipt);
+  } catch (error) {
+    console.warn("[TRANSFER_RECEIPT_DEBUG] Error validando comprobante recibido:", {
+      status: error.response?.status || null,
+      message: error.message,
+      mediaId: transferReceipt.mediaId,
+      mimeType: transferReceipt.mimeType,
+      filename: transferReceipt.filename
+    });
+
+    if (esErrorComprobanteTransferenciaTamano(error)) {
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        "El comprobante supera el tamaño máximo permitido de 5MB. Por favor envía una imagen o PDF más liviano."
+      );
+      return;
+    }
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pudimos leer el comprobante. Por favor intenta enviarlo nuevamente en formato JPG, PNG o PDF."
+    );
+    return;
+  }
+
   const siguienteSesion = {
     ...sesion,
     paso: "aceptando_terminos_transferencia",
@@ -4077,7 +4118,19 @@ ${construirMensajeComprobanteTransferenciaAgendamiento()}`
   };
 
   guardarSesionAgendamiento(from, siguienteSesion);
-  await enviarTerminosTransferenciaAgendamiento(from);
+  try {
+    await enviarTerminosTransferenciaAgendamiento(from);
+  } catch (error) {
+    console.warn("[TRANSFER_RECEIPT_DEBUG] Error enviando términos tras recibir comprobante:", {
+      status: error.response?.status || null,
+      message: error.message
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "Recibimos el comprobante, pero no pudimos mostrar el siguiente paso. Por favor escribe cualquier mensaje para continuar."
+    );
+  }
 }
 
 async function manejarTerminosTransferenciaAgendamiento(from, text, messageId, sesion, buttonId = "") {
@@ -4163,14 +4216,33 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
   try {
     comprobante = await descargarComprobanteTransferenciaWhatsApp(sesion.transferReceipt);
   } catch (error) {
-    console.warn("[AGENDAMIENTO_TRANSFERENCIA] No se pudo descargar comprobante:", {
-      error: error.message,
-      mediaIdPresent: Boolean(sesion?.transferReceipt?.mediaId)
+    console.warn("[TRANSFER_RECEIPT_DEBUG] Error descargando comprobante:", {
+      status: error.response?.status || null,
+      message: error.message,
+      mediaId: sesion?.transferReceipt?.mediaId || null,
+      mimeType: sesion?.transferReceipt?.mimeType || null,
+      filename: sesion?.transferReceipt?.filename || null
     });
+
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "capturando_comprobante_transferencia",
+      transferReceipt: null,
+      transferTermsAccepted: false,
+      timestamp: Date.now()
+    });
+
+    if (esErrorComprobanteTransferenciaTamano(error)) {
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        "El comprobante supera el tamaño máximo permitido de 5MB. Por favor envía una imagen o PDF más liviano."
+      );
+      return;
+    }
 
     await enviarMensajeAgendamientoConNavegacion(
       from,
-      "No pude descargar el comprobante de transferencia desde WhatsApp. Por favor intenta enviarlo nuevamente o contacta a un asesor."
+      "No pudimos leer el comprobante. Por favor intenta enviarlo nuevamente en formato JPG, PNG o PDF."
     );
     return;
   }
@@ -4185,6 +4257,13 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
     });
 
     const response = await enviarRegistroTransferenciaLaravel(sesion, comprobante);
+
+    console.log("[TRANSFER_RECEIPT_DEBUG] Respuesta Laravel para comprobante:", {
+      status: response.status,
+      receiptBytes: comprobante.size,
+      mimeType: comprobante.mimeType,
+      filename: comprobante.filename
+    });
 
     if (response.status === 201) {
       const bookingId = obtenerBookingIdRespuestaTransferencia(response.data);
@@ -4251,12 +4330,52 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
       return;
     }
 
+    if (response.status === 413 || response.status === 415) {
+      console.warn("[TRANSFER_RECEIPT_DEBUG] Laravel rechazó comprobante por tamaño/formato:", {
+        status: response.status,
+        receiptBytes: comprobante.size,
+        mimeType: comprobante.mimeType,
+        filename: comprobante.filename
+      });
+
+      guardarSesionAgendamiento(from, {
+        ...sesion,
+        paso: "capturando_comprobante_transferencia",
+        transferReceipt: null,
+        transferTermsAccepted: false,
+        timestamp: Date.now()
+      });
+
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        "Laravel rechazó el comprobante por tamaño o formato. Por favor envía nuevamente un archivo JPG, PNG o PDF de máximo 5MB."
+      );
+      return;
+    }
+
     if (response.status === 422) {
-      console.warn("[AGENDAMIENTO_TRANSFERENCIA] Laravel rechazó validación:", {
+      console.warn("[TRANSFER_RECEIPT_DEBUG] Laravel rechazó validación:", {
         errors: response.data?.errors || response.data?.message || null,
+        status: response.status,
         professionalId: sesion.professionalId,
         serviceId: sesion.serviceId
       });
+
+      if (respuestaLaravelRechazaComprobanteTransferencia(response.data)) {
+        guardarSesionAgendamiento(from, {
+          ...sesion,
+          paso: "capturando_comprobante_transferencia",
+          transferReceipt: null,
+          transferTermsAccepted: false,
+          timestamp: Date.now()
+        });
+
+        await enviarMensajeAgendamientoConNavegacion(
+          from,
+          "Laravel rechazó el comprobante por tamaño o formato. Por favor envía nuevamente un archivo JPG, PNG o PDF de máximo 5MB."
+        );
+        return;
+      }
 
       await enviarMensajeAgendamientoConNavegacion(
         from,
@@ -4276,10 +4395,12 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
       "No pude completar el registro de la cita en este momento. Por favor intenta nuevamente o contacta a un asesor."
     );
   } catch (error) {
-    console.warn("[AGENDAMIENTO_TRANSFERENCIA] Error temporal registrando cita:", {
+    console.warn("[TRANSFER_RECEIPT_DEBUG] Error enviando multipart a Laravel:", {
       status: error.response?.status || null,
       code: error.code || null,
       message: error.message,
+      receiptBytes: comprobante?.size || null,
+      exceeds5Mb: Boolean(comprobante?.size && comprobante.size > TRANSFER_RECEIPT_MAX_BYTES),
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId
     });
@@ -8094,9 +8215,32 @@ function construirMensajeComprobanteTransferenciaAgendamiento() {
 }
 
 function construirMensajeTerminosTransferenciaAgendamiento() {
-  return `Términos y condiciones
+  return `📋 Términos y condiciones
 
-${TEXTO_LEGAL_TRANSFERENCIA}
+1. Confirmación de la cita
+Una vez validado el pago o comprobante, FamySALUD procederá a validar la información registrada y notificará la confirmación de la cita por los canales oficiales.
+
+2. Pagos y reembolsos
+Los pagos realizados no son reembolsables.
+
+3. Reagendamiento de citas
+Las solicitudes de reagendamiento deberán gestionarse por los canales oficiales de FamySALUD y estarán sujetas a disponibilidad.
+
+4. Responsabilidad del paciente
+Es responsabilidad del paciente ingresar correctamente sus datos personales y seleccionar adecuadamente el servicio, profesional de salud, fecha y modalidad de la cita.
+
+5. Uso del sistema
+FamySALUD podrá validar la información proporcionada y contactar al paciente cuando sea necesario.
+
+⚠️ Importante
+
+Al continuar con el proceso, usted acepta que los pagos no son reembolsables.
+
+Las citas podrán ser reagendadas según disponibilidad, siempre que se notifique con un mínimo de 4 horas de anticipación al turno agendado.
+
+De no realizarse la notificación dentro del tiempo establecido, se aplicará una penalidad del 25% del valor pagado.
+
+Al continuar con el proceso, usted declara haber leído, comprendido y aceptado los presentes términos y condiciones.
 
 1. Acepto
 2. No acepto
@@ -8305,7 +8449,11 @@ function formatearHoraAmPmFinalTransferencia(date, timeZone) {
 }
 
 async function enviarTerminosTransferenciaAgendamiento(to) {
-  await enviarMensajeAgendamientoConNavegacion(to, construirMensajeTerminosTransferenciaAgendamiento());
+  await enviarMensajeAgendamientoConNavegacionSeguro(
+    to,
+    construirMensajeTerminosTransferenciaAgendamiento(),
+    "aceptando_terminos_transferencia"
+  );
 }
 
 function esBotonTerminosTransferenciaAgendamiento(buttonId) {
@@ -8376,6 +8524,12 @@ async function descargarComprobanteTransferenciaWhatsApp(transferReceipt) {
   }
 
   const mediaUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${transferReceipt.mediaId}`;
+  console.log("[TRANSFER_RECEIPT_DEBUG] Consultando metadata de WhatsApp:", {
+    mediaId: transferReceipt.mediaId,
+    mimeType: transferReceipt.mimeType || null,
+    filename: transferReceipt.filename || null
+  });
+
   const metadata = await axios.get(mediaUrl, {
     timeout: 10000,
     headers: {
@@ -8390,6 +8544,14 @@ async function descargarComprobanteTransferenciaWhatsApp(transferReceipt) {
 
   const contentLength = Number.parseInt(metadata.data?.file_size || metadata.data?.fileSize || "0", 10);
 
+  console.log("[TRANSFER_RECEIPT_DEBUG] Metadata de WhatsApp recibida:", {
+    mediaId: transferReceipt.mediaId,
+    mimeType: metadata.data?.mime_type || transferReceipt.mimeType || null,
+    filename: transferReceipt.filename || null,
+    fileSize: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
+    hasSha256: Boolean(transferReceipt.sha256)
+  });
+
   if (Number.isFinite(contentLength) && contentLength > TRANSFER_RECEIPT_MAX_BYTES) {
     throw new Error("El comprobante supera el tamaño máximo permitido de 5MB.");
   }
@@ -8403,6 +8565,12 @@ async function descargarComprobanteTransferenciaWhatsApp(transferReceipt) {
     }
   });
   const buffer = Buffer.from(archivo.data);
+
+  console.log("[TRANSFER_RECEIPT_DEBUG] Buffer de comprobante descargado:", {
+    mediaId: transferReceipt.mediaId,
+    bufferBytes: buffer.length,
+    exceeds5Mb: buffer.length > TRANSFER_RECEIPT_MAX_BYTES
+  });
 
   if (buffer.length > TRANSFER_RECEIPT_MAX_BYTES) {
     throw new Error("El comprobante supera el tamaño máximo permitido de 5MB.");
@@ -8511,6 +8679,32 @@ function obtenerBookingIdRespuestaTransferencia(data) {
     || data?.id
     || data?.data?.id
     || null;
+}
+
+function esErrorComprobanteTransferenciaTamano(error) {
+  return /5MB|tama(?:ñ|Ã±)o m(?:á|Ã¡)ximo|maxContentLength|max body length/i.test(String(error?.message || ""));
+}
+
+function respuestaLaravelRechazaComprobanteTransferencia(data) {
+  const contenido = JSON.stringify(data || {}).toLowerCase();
+
+  if (!contenido) {
+    return false;
+  }
+
+  return contenido.includes("tr_file")
+    && (
+      contenido.includes("max")
+      || contenido.includes("size")
+      || contenido.includes("tamaño")
+      || contenido.includes("tamano")
+      || contenido.includes("mimes")
+      || contenido.includes("mime")
+      || contenido.includes("jpg")
+      || contenido.includes("jpeg")
+      || contenido.includes("png")
+      || contenido.includes("pdf")
+    );
 }
 
 function validarTitularTransferenciaAgendamiento(text) {
