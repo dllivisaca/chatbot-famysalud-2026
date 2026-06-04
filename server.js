@@ -2529,7 +2529,7 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
   }
 
   if (sesion.paso === "cita_transferencia_registrada") {
-    await enviarMensajeAgendamientoConNavegacion(
+    await enviarMensajeConMenuPrincipal(
       from,
       construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion)
     );
@@ -4194,7 +4194,10 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
         bookingId,
         bookingResponse: {
           status: response.status,
-          bookingId
+          bookingId,
+          success: response.data?.success ?? response.data?.data?.success ?? null,
+          isOutsideBusinessHours: response.data?.is_outside_business_hours ?? response.data?.data?.is_outside_business_hours ?? false,
+          appointment: response.data?.appointment || response.data?.data?.appointment || null
         },
         timestamp: Date.now()
       };
@@ -4210,7 +4213,7 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
         }
       });
 
-      await enviarMensajeAgendamientoConNavegacion(
+      await enviarMensajeConMenuPrincipal(
         from,
         construirMensajeCitaTransferenciaRegistradaAgendamiento(sesionRegistrada)
       );
@@ -8108,15 +8111,197 @@ El flujo queda listo en estado transferencia_completa_pendiente_registro. Falta 
 }
 
 function construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion) {
-  const codigoReserva = sesion?.bookingId
-    ? `\n\nCódigo de reserva: ${sesion.bookingId}`
+  const detalle = construirDetalleCitaTransferenciaRegistradaAgendamiento(sesion);
+  const bloqueFueraHorario = detalle.isOutsideBusinessHours
+    ? `
+
+Solicitud registrada fuera de horario laboral.
+Nuestro equipo confirmará su cita durante el próximo horario de atención.
+
+Horario de atención:
+Lun-Vie: 7:30 AM - 5:30 PM
+Sáb: 8:00 AM - 12:30 PM`
     : "";
 
-  return `Tu cita fue registrada correctamente.
+  return `¡Cita registrada!
 
-El comprobante de transferencia quedó pendiente de validación por nuestro equipo.${codigoReserva}
+Su cita fue registrada correctamente y se encuentra pendiente de confirmación.
 
-Te contactaremos si necesitamos confirmar algún dato adicional.`;
+Código de reserva: ${detalle.bookingId}
+Estado: ${detalle.status}
+Servicio: ${detalle.service}
+Profesional de salud: ${detalle.employee}
+Modalidad: ${detalle.mode}
+Fecha: ${detalle.date}
+Hora: ${detalle.time}
+Zona horaria: ${detalle.timezone}
+Total: $${detalle.total}${bloqueFueraHorario}
+
+Hemos recibido su comprobante de pago y lo estamos validando.
+Guarde su código de reserva para cualquier consulta.
+
+Le enviamos un correo electrónico con el resumen de su cita.
+Recibirá un segundo correo cuando su cita haya sido confirmada.`;
+}
+
+function construirDetalleCitaTransferenciaRegistradaAgendamiento(sesion) {
+  const appointment = sesion?.bookingResponse?.appointment || {};
+  const appointmentMode = appointment.appointment_mode || sesion?.appointmentMode || "No especificada";
+  const appointmentModeNormalized = String(appointmentMode || "").toLowerCase();
+  const appointmentDate = appointment.appointment_date || sesion?.appointmentDate || "";
+  const appointmentTime = appointment.appointment_time || sesion?.appointmentTime || "";
+  const appointmentEndTime = appointment.appointment_end_time || sesion?.appointmentEndTime || "";
+  const timezoneInfo = construirZonaHorariaFinalTransferenciaAgendamiento(sesion, appointment, appointmentModeNormalized);
+
+  return {
+    bookingId: sesion?.bookingId || sesion?.bookingResponse?.bookingId || "No disponible",
+    status: construirEstadoFinalTransferenciaAgendamiento(appointment.status),
+    service: obtenerNombreServicioFinalTransferenciaAgendamiento(appointment, sesion),
+    employee: obtenerNombreProfesionalFinalTransferenciaAgendamiento(appointment, sesion),
+    mode: construirEtiquetaModalidadAgendamiento(appointmentModeNormalized),
+    date: formatearFechaFinalTransferenciaAgendamiento(appointmentDate),
+    time: construirHoraFinalTransferenciaAgendamiento({
+      appointmentDate,
+      appointmentTime,
+      appointmentEndTime,
+      appointmentMode: appointmentModeNormalized,
+      timezone: timezoneInfo.timezone,
+      fallback: sesion?.appointmentTimeLabel
+    }),
+    timezone: timezoneInfo.label,
+    total: formatearMontoAgendamiento(appointment.amount ?? sesion?.paymentAmount),
+    isOutsideBusinessHours: Boolean(sesion?.bookingResponse?.isOutsideBusinessHours)
+  };
+}
+
+function construirEstadoFinalTransferenciaAgendamiento(status) {
+  if (String(status || "").trim().toLowerCase() === "pending_verification") {
+    return "Pendiente de verificación";
+  }
+
+  return status || "Pendiente de verificación";
+}
+
+function obtenerNombreServicioFinalTransferenciaAgendamiento(appointment, sesion) {
+  const service = appointment.service;
+
+  return service?.title
+    || service?.name
+    || appointment.service_name
+    || appointment.serviceName
+    || (typeof service === "string" ? service : null)
+    || sesion?.serviceTitle
+    || "No especificado";
+}
+
+function obtenerNombreProfesionalFinalTransferenciaAgendamiento(appointment, sesion) {
+  const employee = appointment.employee;
+
+  return employee?.name
+    || employee?.full_name
+    || appointment.employee_name
+    || appointment.employeeName
+    || (typeof employee === "string" ? employee : null)
+    || sesion?.professionalName
+    || "No especificado";
+}
+
+function construirZonaHorariaFinalTransferenciaAgendamiento(sesion, appointment, appointmentMode) {
+  if (appointmentMode === "virtual") {
+    const timezone = appointment.patient_timezone || sesion?.patientTimezone || null;
+    const label = appointment.patient_timezone_label
+      || sesion?.patientTimezoneLabel
+      || timezone
+      || "Hora de Ecuador";
+
+    return {
+      timezone,
+      label
+    };
+  }
+
+  return {
+    timezone: null,
+    label: "GMT-5 (Ecuador) (zona horaria de Ecuador)"
+  };
+}
+
+function formatearFechaFinalTransferenciaAgendamiento(fechaISO) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || ""))) {
+    return fechaISO || "No especificada";
+  }
+
+  const [anio, mes, dia] = String(fechaISO).split("-").map((parte) => Number.parseInt(parte, 10));
+  const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
+
+  return new Intl.DateTimeFormat("es-EC", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC"
+  }).format(fecha);
+}
+
+function construirHoraFinalTransferenciaAgendamiento({ appointmentDate, appointmentTime, appointmentEndTime, appointmentMode, timezone, fallback }) {
+  if (appointmentMode === "virtual" && timezone) {
+    const inicioVirtual = convertirHoraEcuadorAZonaUsuarioFinalTransferencia(appointmentDate, appointmentTime, timezone);
+    const finVirtual = appointmentEndTime
+      ? convertirHoraEcuadorAZonaUsuarioFinalTransferencia(appointmentDate, appointmentEndTime, timezone)
+      : "";
+
+    if (inicioVirtual) {
+      return finVirtual ? `${inicioVirtual} - ${finVirtual}` : inicioVirtual;
+    }
+  }
+
+  const inicio = formatearHoraFinalEcuadorTransferenciaAgendamiento(appointmentTime);
+  const fin = formatearHoraFinalEcuadorTransferenciaAgendamiento(appointmentEndTime);
+
+  if (inicio) {
+    return fin ? `${inicio} - ${fin}` : inicio;
+  }
+
+  return fallback || "No especificada";
+}
+
+function formatearHoraFinalEcuadorTransferenciaAgendamiento(value) {
+  const horaNormalizada = normalizarHoraEcuadorAgendamiento(value);
+
+  if (!horaNormalizada) {
+    return null;
+  }
+
+  const fecha = new Date(`2000-01-01T${horaNormalizada}-05:00`);
+
+  return formatearHoraAmPmFinalTransferencia(fecha, "America/Guayaquil");
+}
+
+function convertirHoraEcuadorAZonaUsuarioFinalTransferencia(fechaISO, horaEcuador, timeZone) {
+  try {
+    const horaNormalizada = normalizarHoraEcuadorAgendamiento(horaEcuador);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || "")) || !horaNormalizada) {
+      return null;
+    }
+
+    return formatearHoraAmPmFinalTransferencia(new Date(`${fechaISO}T${horaNormalizada}-05:00`), timeZone);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] No se pudo convertir hora final:", {
+      timeZone,
+      error: error.message
+    });
+    return null;
+  }
+}
+
+function formatearHoraAmPmFinalTransferencia(date, timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+    hourCycle: "h12"
+  }).format(date).replace(/\s+/g, " ");
 }
 
 async function enviarTerminosTransferenciaAgendamiento(to) {
