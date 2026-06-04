@@ -287,6 +287,17 @@ function construirDetalleErrorLog(error, contexto = {}) {
   };
 }
 
+function resumirTextoFlujoAgendamientoLog(text) {
+  const value = String(text || "").trim().replace(/\s+/g, " ");
+  if (!value) {
+    return "";
+  }
+
+  return value
+    .replace(/\d/g, "*")
+    .slice(0, 80);
+}
+
 function obtenerFlowKeyAsesor(origen = "paciente") {
   if (origen === "alianza_existente") return "alianza_existente_hablar_asesor";
   if (origen === "alianza_potencial") return "alianza_potencial_hablar_asesor";
@@ -621,9 +632,11 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   }
 
+  let from = null;
+
   try {
     const messageId = message.id;
-    const from = message.from;
+    from = message.from;
     const text = extraerTexto(message);
     const rawText = extraerTextoOriginal(message);
     const buttonId = extraerButtonReplyId(message);
@@ -769,6 +782,18 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   } catch (error) {
     console.error("[ERROR] Procesando mensaje:", error.response?.data || error.message);
+    console.warn("[AGENDAMIENTO_FLOW_DEBUG] Error general procesando mensaje:", {
+      estadoActual: from ? obtenerSesionAgendamiento(from)?.paso || null : null,
+      messageType: message?.type || null,
+      errorStatus: error.response?.status || null,
+      errorMessage: error.message
+    });
+    if (from && estaEnFlujoAgendamiento(from)) {
+      await enviarMensajeTexto(
+        from,
+        "Tuvimos un problema temporal procesando este paso. Por favor intenta nuevamente o escribe menú principal para salir."
+      );
+    }
     return res.sendStatus(200);
   }
 });
@@ -2154,6 +2179,20 @@ async function manejarBoton(to, buttonId, messageId) {
   }
 
   if (accion.type === "appointment_back") {
+    const sesionAgendamiento = obtenerSesionAgendamiento(to);
+    if (!sesionAgendamiento || sesionAgendamiento.paso === "cita_transferencia_registrada") {
+      console.warn("[AGENDAMIENTO_FLOW_DEBUG] Boton volver ignorado por contexto no vigente:", {
+        estadoActual: sesionAgendamiento?.paso || null,
+        buttonId,
+        messageId
+      });
+      await enviarMensajeTexto(
+        to,
+        "Esta opción ya no corresponde al paso actual. Por favor usa las opciones del último mensaje."
+      );
+      return;
+    }
+
     await volverAgendamiento(to, messageId);
     return;
   }
@@ -2383,8 +2422,20 @@ Si prefieres, también puedes completar todo el proceso directamente desde Whats
 async function manejarFlujoAgendamiento(from, text, messageId, message = null, buttonId = "") {
   const sesion = obtenerSesionAgendamiento(from);
 
+  console.log("[AGENDAMIENTO_FLOW_DEBUG] Mensaje en flujo de agendamiento:", {
+    estadoActual: sesion?.paso || null,
+    buttonId: buttonId || null,
+    textoRecibido: resumirTextoFlujoAgendamientoLog(text),
+    messageType: message?.type || null
+  });
+
   if (!sesion) {
     await enviarMenu(from, "pacientes");
+    return;
+  }
+
+  if (esTextoVolverAgendamiento(text)) {
+    await volverAgendamiento(from, messageId);
     return;
   }
 
@@ -4511,6 +4562,11 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
 
 async function volverAgendamiento(to, messageId) {
   const sesion = obtenerSesionAgendamiento(to);
+  console.log("[AGENDAMIENTO_FLOW_DEBUG] Volver atras recibido:", {
+    estadoActual: sesion?.paso || null,
+    buttonId: "agendamiento_volver",
+    messageId
+  });
 
   registrarEvento(to, "button_click", {
     messageId,
@@ -4604,7 +4660,7 @@ async function volverAgendamiento(to, messageId) {
       message: null
     },
     capturando_banco_origen_transferencia: {
-      paso: "seleccionando_metodo_pago",
+      paso: "aceptando_terminos_pago",
       message: null
     },
     capturando_titular_transferencia: {
@@ -4652,12 +4708,21 @@ async function volverAgendamiento(to, messageId) {
       timestamp: Date.now()
     };
 
+    console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
+      estadoActual: sesion.paso,
+      estadoDestino: sesionMetodoPago.paso
+    });
+
     guardarSesionAgendamiento(to, sesionMetodoPago);
     await enviarSeleccionMetodoPagoAgendamiento(to, sesionMetodoPago);
     return;
   }
 
   if (sesion?.paso === "pago_tarjeta_pendiente_integracion") {
+    console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
+      estadoActual: sesion.paso,
+      estadoDestino: "aceptando_terminos_pago"
+    });
     guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "aceptando_terminos_pago",
@@ -4669,30 +4734,35 @@ async function volverAgendamiento(to, messageId) {
   }
 
   if (sesion?.paso === "capturando_banco_origen_transferencia") {
-    const sesionMetodoPago = {
+    const sesionTerminosPago = {
       ...sesion,
-      paso: "seleccionando_metodo_pago",
-      paymentMethod: null,
-      paymentAmount: null,
-      paymentAmountStandard: null,
-      paymentDiscountAmount: null,
+      paso: "aceptando_terminos_pago",
       paymentTermsAccepted: false,
       transferOriginBank: null,
       transferPayerName: null,
       transferDate: null,
       transferReference: null,
       transferReceipt: null,
-      transferTermsAccepted: null,
+      transferTermsAccepted: false,
       transferOriginBankRequiresCustom: false,
       timestamp: Date.now()
     };
 
-    guardarSesionAgendamiento(to, sesionMetodoPago);
-    await enviarSeleccionMetodoPagoAgendamiento(to, sesionMetodoPago);
+    console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
+      estadoActual: sesion.paso,
+      estadoDestino: sesionTerminosPago.paso
+    });
+
+    guardarSesionAgendamiento(to, sesionTerminosPago);
+    await enviarTerminosPagoAgendamiento(to);
     return;
   }
 
   if (sesion?.paso === "transferencia_completa_pendiente_registro") {
+    console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
+      estadoActual: sesion.paso,
+      estadoDestino: "capturando_comprobante_transferencia"
+    });
     guardarSesionAgendamiento(to, {
       ...sesion,
       paso: "capturando_comprobante_transferencia",
@@ -4721,6 +4791,11 @@ async function volverAgendamiento(to, messageId) {
       transferOriginBankRequiresCustom: false,
       timestamp: Date.now()
     };
+
+    console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
+      estadoActual: sesion.paso,
+      estadoDestino: sesionMetodoPago.paso
+    });
 
     guardarSesionAgendamiento(to, sesionMetodoPago);
     await enviarSeleccionMetodoPagoAgendamiento(to, sesionMetodoPago);
@@ -4751,6 +4826,10 @@ async function volverAgendamiento(to, messageId) {
   const pasoPacienteAnterior = pasosPacienteAnteriores[sesion?.paso];
 
   if (pasoPacienteAnterior) {
+    console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
+      estadoActual: sesion?.paso || null,
+      estadoDestino: pasoPacienteAnterior.paso
+    });
     guardarSesionAgendamiento(to, {
       ...sesion,
       paso: pasoPacienteAnterior.paso,
@@ -6357,7 +6436,12 @@ async function enviarCorreoInternoConEstadisticas(from, flowKey, subject, messag
         errorType: error?.code || error?.name || "email_error"
       }
     });
-    throw error;
+    await enviarMensajeTexto(
+      to,
+      step === "aceptando_terminos_pago"
+        ? construirMensajeFallbackTerminosPagoAgendamiento()
+        : "No pudimos mostrar los botones de navegación. Puedes escribir volver atrás o menú principal para continuar."
+    );
   }
 }
 
@@ -6752,7 +6836,17 @@ function debeMostrarMenu(text) {
 }
 
 function debeResetearConversacion(text) {
-  return ["hola", "menu", "menú", "inicio"].includes(text);
+  return ["hola", "menu", "menú", "menú principal", "menu principal", "inicio"].includes(text);
+}
+
+function esTextoVolverAgendamiento(text) {
+  const value = String(text || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  return ["volver", "volver atras", "atras"].includes(value);
 }
 
 function sesionExpirada(sesion) {
@@ -8614,11 +8708,23 @@ async function enviarTerminosTransferenciaAgendamiento(to) {
 }
 
 async function enviarTerminosPagoAgendamiento(to) {
-  await enviarMensajeAgendamientoConNavegacionSeguro(
-    to,
-    construirMensajeTerminosTransferenciaAgendamiento(),
-    "aceptando_terminos_pago"
-  );
+  try {
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeTerminosTransferenciaAgendamiento(),
+      "aceptando_terminos_pago"
+    );
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_FLOW_DEBUG] Fallback texto para terminos de pago:", {
+      errorStatus: error.response?.status || null,
+      errorMessage: error.message
+    });
+    await enviarMensajeTexto(to, construirMensajeFallbackTerminosPagoAgendamiento());
+  }
+}
+
+function construirMensajeFallbackTerminosPagoAgendamiento() {
+  return "Responde 1 para aceptar o 2 para no aceptar. También puedes escribir menú principal para salir.";
 }
 
 function esBotonTerminosTransferenciaAgendamiento(buttonId) {
@@ -9132,7 +9238,22 @@ function dividirMensajePorLineas(message, maxLength = 1200) {
 }
 
 async function enviarMensajeAgendamientoConNavegacion(to, message) {
-  await enviarBotones(to, message, [botonVolverAgendamiento(), botonMenuPrincipal()]);
+  try {
+    await enviarBotones(to, message, [botonVolverAgendamiento(), botonMenuPrincipal()]);
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_FLOW_DEBUG] Error enviando botones de navegacion. Usando fallback texto:", {
+      estadoActual: obtenerSesionAgendamiento(to)?.paso || null,
+      messageLength: String(message || "").length,
+      errorStatus: error.response?.status || null,
+      errorMessage: error.message
+    });
+    await enviarMensajeTexto(
+      to,
+      `${message}
+
+Puedes escribir "volver atrás" o "menú principal" para navegar.`
+    );
+  }
 }
 
 async function enviarMensajeAgendamientoConNavegacionSeguro(to, message, step = "agendamiento") {
@@ -9164,7 +9285,17 @@ async function enviarMensajeAgendamientoConNavegacionSeguro(to, message, step = 
       parts: partes.length,
       step
     }));
-    throw error;
+    console.warn("[AGENDAMIENTO_FLOW_DEBUG] Fallback texto por error enviando botones:", {
+      estadoActual: obtenerSesionAgendamiento(to)?.paso || null,
+      errorStatus: error.response?.status || null,
+      errorMessage: error.message
+    });
+    await enviarMensajeTexto(
+      to,
+      step === "aceptando_terminos_pago"
+        ? construirMensajeFallbackTerminosPagoAgendamiento()
+        : "No pudimos mostrar los botones de navegación. Puedes escribir volver atrás o menú principal para continuar."
+    );
   }
 }
 
