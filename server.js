@@ -510,6 +510,7 @@ wa.me/593939034743
 0939034743
 
 Estaremos encantados de ayudarte 😊` },
+  paciente_agendar_whatsapp: { type: "appointment_booking_continue" },
   paciente_cotizar: { type: "catalog_areas" },
   paciente_mas_opciones_1: { type: "menu", menu: "pacientesMasOpciones1" },
   paciente_resultados: { type: "results_request" },
@@ -2233,6 +2234,26 @@ async function manejarBoton(to, buttonId, messageId) {
       return;
     }
 
+    await enviarOpcionesInicioAgendamiento(to, messageId, buttonId);
+    return;
+  }
+
+  if (accion.type === "appointment_booking_continue") {
+    if (!puedeUsarAgendamiento(to)) {
+      registrarEvento(to, "flow_completed", {
+        messageId,
+        buttonId,
+        flowKey: buttonId,
+        payload: {
+          actionType: accion.type,
+          enabled: false,
+          allowed: false
+        }
+      });
+      await enviarMensajeConMenuPrincipal(to, ACCIONES_BOTONES.paciente_agendar_cita.text);
+      return;
+    }
+
     await manejarAgendamientoCita(to, messageId);
     return;
   }
@@ -2330,6 +2351,33 @@ Estoy preparando tu cita paso a paso.
 Por ahora no pude cargar las áreas de atención disponibles. Por favor intenta nuevamente más tarde o vuelve al menú principal.`
     );
   }
+}
+
+async function enviarOpcionesInicioAgendamiento(to, messageId, buttonId) {
+  registrarEvento(to, "flow_step_completed", {
+    messageId,
+    buttonId,
+    flowKey: "agendamiento_citas",
+    payload: {
+      action: "appointment_booking_intro_opened",
+      allowed: true
+    }
+  });
+
+  await enviarBotones(
+    to,
+    `📅 Agendamiento de citas
+
+Puedes agendar tu cita de forma rápida desde nuestra aplicación web:
+
+🌐 https://app.famysaludec.com
+
+Si prefieres, también puedes completar todo el proceso directamente desde WhatsApp con ayuda de FamyBOT.`,
+    [
+      boton("paciente_agendar_whatsapp", "Continuar WhatsApp"),
+      botonMenuPrincipal()
+    ]
+  );
 }
 
 async function manejarFlujoAgendamiento(from, text, messageId, message = null, buttonId = "") {
@@ -2490,6 +2538,11 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
     return;
   }
 
+  if (sesion.paso === "aceptando_terminos_pago") {
+    await manejarTerminosPagoAgendamiento(from, text, messageId, sesion, buttonId);
+    return;
+  }
+
   if (sesion.paso === "capturando_banco_origen_transferencia") {
     await manejarBancoOrigenTransferenciaAgendamiento(from, text, messageId, sesion);
     return;
@@ -2516,7 +2569,15 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
   }
 
   if (sesion.paso === "aceptando_terminos_transferencia") {
-    await manejarTerminosTransferenciaAgendamiento(from, text, messageId, sesion, buttonId);
+    await manejarTerminosPagoAgendamiento(from, text, messageId, sesion, buttonId);
+    return;
+  }
+
+  if (sesion.paso === "pago_tarjeta_pendiente_integracion") {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajePagoTarjetaPendienteIntegracionAgendamiento()
+    );
     return;
   }
 
@@ -3825,31 +3886,25 @@ Responde con el número de la opción.`
 
   const sesionConPago = {
     ...sesion,
-    paso: paymentMethod === "transfer" ? "capturando_banco_origen_transferencia" : "metodo_pago_seleccionado",
+    paso: "aceptando_terminos_pago",
     paymentMethod,
     paymentAmount: paymentMethod === "transfer" ? figuras.transfer : figuras.standard,
     paymentAmountStandard: figuras.standard,
     paymentDiscountAmount: figuras.discount,
-    transferOriginBank: paymentMethod === "transfer" ? null : sesion.transferOriginBank,
-    transferPayerName: paymentMethod === "transfer" ? null : sesion.transferPayerName,
-    transferDate: paymentMethod === "transfer" ? null : sesion.transferDate,
-    transferReference: paymentMethod === "transfer" ? null : sesion.transferReference,
-    transferReceipt: paymentMethod === "transfer" ? null : sesion.transferReceipt,
-    transferTermsAccepted: paymentMethod === "transfer" ? false : sesion.transferTermsAccepted,
+    transferOriginBank: null,
+    transferPayerName: null,
+    transferDate: null,
+    transferReference: null,
+    transferReceipt: null,
+    transferTermsAccepted: false,
+    paymentTermsAccepted: false,
     transferOriginBankRequiresCustom: false,
     timestamp: Date.now()
   };
 
   guardarSesionAgendamiento(from, sesionConPago);
 
-  const mensajeSeleccionado = paymentMethod === "transfer"
-    ? construirMensajeInicioTransferenciaAgendamiento(sesionConPago)
-    : construirMensajeMetodoPagoSeleccionadoAgendamiento(sesionConPago);
-
-  await enviarMensajeAgendamientoConNavegacion(
-    from,
-    mensajeSeleccionado || "El siguiente paso del agendamiento será continuar con el pago."
-  );
+  await enviarTerminosPagoAgendamiento(from);
 }
 
 async function manejarBancoOrigenTransferenciaAgendamiento(from, text, messageId, sesion) {
@@ -4109,65 +4164,14 @@ ${construirMensajeComprobanteTransferenciaAgendamiento()}`
 
   const siguienteSesion = {
     ...sesion,
-    paso: "aceptando_terminos_transferencia",
-    transferReceipt,
-    timestamp: Date.now()
-  };
-
-  guardarSesionAgendamiento(from, siguienteSesion);
-  try {
-    await enviarTerminosTransferenciaAgendamiento(from);
-  } catch (error) {
-    console.warn("[TRANSFER_RECEIPT_DEBUG] Error enviando términos tras recibir comprobante:", {
-      status: error.response?.status || null,
-      message: error.message
-    });
-
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      "Recibimos el comprobante, pero no pudimos mostrar el siguiente paso. Por favor escribe cualquier mensaje para continuar."
-    );
-  }
-}
-
-async function manejarTerminosTransferenciaAgendamiento(from, text, messageId, sesion, buttonId = "") {
-  const transferTermsAccepted = normalizarAceptacionTerminosTransferenciaAgendamiento(buttonId || text);
-
-  if (transferTermsAccepted === null) {
-    registrarEvento(from, "invalid_message", {
-      messageId,
-      flowKey: "agendamiento_transferencia",
-      payload: {
-        reason: "invalid_transfer_terms_acceptance"
-      }
-    });
-
-    await enviarTerminosTransferenciaAgendamiento(from);
-    return;
-  }
-
-  if (!transferTermsAccepted) {
-    guardarSesionAgendamiento(from, {
-      ...sesion,
-      transferTermsAccepted: false,
-      timestamp: Date.now()
-    });
-
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      "No podemos continuar con el registro de transferencia sin la aceptación de términos y condiciones."
-    );
-    return;
-  }
-
-  const transferenciaCompleta = {
-    ...sesion,
     paso: "transferencia_completa_pendiente_registro",
+    transferReceipt,
+    paymentTermsAccepted: true,
     transferTermsAccepted: true,
     timestamp: Date.now()
   };
 
-  guardarSesionAgendamiento(from, transferenciaCompleta);
+  guardarSesionAgendamiento(from, siguienteSesion);
 
   registrarEvento(from, "flow_completed", {
     messageId,
@@ -4178,7 +4182,82 @@ async function manejarTerminosTransferenciaAgendamiento(from, text, messageId, s
     }
   });
 
-  await registrarCitaTransferenciaAgendamiento(from, transferenciaCompleta, messageId);
+  await registrarCitaTransferenciaAgendamiento(from, siguienteSesion, messageId);
+}
+
+async function manejarTerminosPagoAgendamiento(from, text, messageId, sesion, buttonId = "") {
+  const paymentTermsAccepted = normalizarAceptacionTerminosTransferenciaAgendamiento(buttonId || text);
+
+  if (paymentTermsAccepted === null) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      flowKey: "agendamiento_pago",
+      payload: {
+        reason: "invalid_payment_terms_acceptance"
+      }
+    });
+
+    await enviarTerminosPagoAgendamiento(from);
+    return;
+  }
+
+  if (!paymentTermsAccepted) {
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paymentTermsAccepted: false,
+      transferTermsAccepted: false,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No podemos continuar con el proceso de pago sin la aceptación de términos y condiciones."
+    );
+    return;
+  }
+
+  if (sesion.paymentMethod === "transfer") {
+    const sesionTransferencia = {
+      ...sesion,
+      paso: "capturando_banco_origen_transferencia",
+      paymentTermsAccepted: true,
+      transferTermsAccepted: true,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(from, sesionTransferencia);
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeInicioTransferenciaAgendamiento(sesionTransferencia)
+    );
+    return;
+  }
+
+  if (sesion.paymentMethod === "card") {
+    const sesionTarjeta = {
+      ...sesion,
+      paso: "pago_tarjeta_pendiente_integracion",
+      paymentTermsAccepted: true,
+      transferTermsAccepted: false,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(from, sesionTarjeta);
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajePagoTarjetaPendienteIntegracionAgendamiento()
+    );
+    return;
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "seleccionando_metodo_pago",
+    paymentTermsAccepted: false,
+    timestamp: Date.now()
+  });
+
+  await enviarSeleccionMetodoPagoAgendamiento(from, sesion);
 }
 
 async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = null) {
@@ -4520,6 +4599,10 @@ async function volverAgendamiento(to, messageId) {
       paso: "consentimiento_datos_personales",
       message: construirMensajeConsentimientoDatosPersonalesAgendamiento()
     },
+    aceptando_terminos_pago: {
+      paso: "seleccionando_metodo_pago",
+      message: null
+    },
     capturando_banco_origen_transferencia: {
       paso: "seleccionando_metodo_pago",
       message: null
@@ -4541,14 +4624,49 @@ async function volverAgendamiento(to, messageId) {
       message: construirMensajeReferenciaTransferenciaAgendamiento()
     },
     aceptando_terminos_transferencia: {
-      paso: "capturando_comprobante_transferencia",
-      message: construirMensajeComprobanteTransferenciaAgendamiento()
+      paso: "seleccionando_metodo_pago",
+      message: null
     },
     transferencia_completa_pendiente_registro: {
-      paso: "aceptando_terminos_transferencia",
-      message: null
+      paso: "capturando_comprobante_transferencia",
+      message: construirMensajeComprobanteTransferenciaAgendamiento()
     }
   };
+
+  if (sesion?.paso === "aceptando_terminos_pago" || sesion?.paso === "aceptando_terminos_transferencia") {
+    const sesionMetodoPago = {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentAmountStandard: null,
+      paymentDiscountAmount: null,
+      paymentTermsAccepted: false,
+      transferTermsAccepted: false,
+      transferOriginBank: null,
+      transferPayerName: null,
+      transferDate: null,
+      transferReference: null,
+      transferReceipt: null,
+      transferOriginBankRequiresCustom: false,
+      timestamp: Date.now()
+    };
+
+    guardarSesionAgendamiento(to, sesionMetodoPago);
+    await enviarSeleccionMetodoPagoAgendamiento(to, sesionMetodoPago);
+    return;
+  }
+
+  if (sesion?.paso === "pago_tarjeta_pendiente_integracion") {
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: "aceptando_terminos_pago",
+      paymentTermsAccepted: false,
+      timestamp: Date.now()
+    });
+    await enviarTerminosPagoAgendamiento(to);
+    return;
+  }
 
   if (sesion?.paso === "capturando_banco_origen_transferencia") {
     const sesionMetodoPago = {
@@ -4558,6 +4676,7 @@ async function volverAgendamiento(to, messageId) {
       paymentAmount: null,
       paymentAmountStandard: null,
       paymentDiscountAmount: null,
+      paymentTermsAccepted: false,
       transferOriginBank: null,
       transferPayerName: null,
       transferDate: null,
@@ -4576,11 +4695,11 @@ async function volverAgendamiento(to, messageId) {
   if (sesion?.paso === "transferencia_completa_pendiente_registro") {
     guardarSesionAgendamiento(to, {
       ...sesion,
-      paso: "aceptando_terminos_transferencia",
-      transferTermsAccepted: false,
+      paso: "capturando_comprobante_transferencia",
+      transferReceipt: null,
       timestamp: Date.now()
     });
-    await enviarTerminosTransferenciaAgendamiento(to);
+    await enviarMensajeAgendamientoConNavegacion(to, construirMensajeComprobanteTransferenciaAgendamiento());
     return;
   }
 
@@ -4592,6 +4711,7 @@ async function volverAgendamiento(to, messageId) {
       paymentAmount: null,
       paymentAmountStandard: null,
       paymentDiscountAmount: null,
+      paymentTermsAccepted: false,
       transferOriginBank: null,
       transferPayerName: null,
       transferDate: null,
@@ -8232,6 +8352,14 @@ function construirMensajeComprobanteTransferenciaAgendamiento() {
   return "Adjunta el comprobante de pago en formato JPG, PNG o PDF.";
 }
 
+function construirMensajePagoTarjetaPendienteIntegracionAgendamiento() {
+  return `💳 Pago con tarjeta
+
+Has aceptado los términos y condiciones.
+
+En el siguiente paso continuaremos con la generación del enlace de pago seguro para completar tu reserva.`;
+}
+
 function construirMensajeTerminosTransferenciaAgendamiento() {
   return `📋 Términos y condiciones
 
@@ -8482,10 +8610,14 @@ function formatearHoraAmPmFinalTransferencia(date, timeZone) {
 }
 
 async function enviarTerminosTransferenciaAgendamiento(to) {
+  await enviarTerminosPagoAgendamiento(to);
+}
+
+async function enviarTerminosPagoAgendamiento(to) {
   await enviarMensajeAgendamientoConNavegacionSeguro(
     to,
     construirMensajeTerminosTransferenciaAgendamiento(),
-    "aceptando_terminos_transferencia"
+    "aceptando_terminos_pago"
   );
 }
 
@@ -8534,6 +8666,10 @@ function validarSesionTransferenciaListaParaRegistroAgendamiento(sesion) {
 
   if (sesion?.transferTermsAccepted !== true) {
     missing.push("transferTermsAccepted");
+  }
+
+  if (sesion?.paymentTermsAccepted !== true) {
+    missing.push("paymentTermsAccepted");
   }
 
   if (sesion?.dataConsent !== true) {
@@ -8831,6 +8967,15 @@ function comprobanteTransferenciaPermitido(transferReceipt) {
 
 function normalizarAceptacionTerminosTransferenciaAgendamiento(text) {
   const value = String(text || "").trim().toLowerCase();
+
+  if (value === "acepto") {
+    return true;
+  }
+
+  if (value === "no acepto") {
+    return false;
+  }
+
   const indice = obtenerIndiceDesdeTexto(value);
 
   if (indice === 0) {
