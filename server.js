@@ -42,6 +42,7 @@ const PORT = process.env.PORT || 3000;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const CHATBOT_WEBHOOK_SECRET = process.env.CHATBOT_WEBHOOK_SECRET;
 const CHATBOT_CATALOG_URL = process.env.CHATBOT_CATALOG_URL;
 const CHATBOT_CATALOG_BASE_URL = process.env.CHATBOT_CATALOG_BASE_URL;
 const CHATBOT_CATALOG_PATH = process.env.CHATBOT_CATALOG_PATH;
@@ -149,6 +150,7 @@ Te esperamos en el siguiente horario laboral 💙`;
 const INTERVALO_REVISION_FERIADOS_MS = 60 * 1000;
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_ACEPTACION_ASESOR_MS = 3 * 60 * 1000;
+const TIEMPO_RESTAURACION_ASESOR_MS = 30 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
 const temporizadoresSesionAsesor = new Map();
@@ -608,6 +610,213 @@ Será un gusto conocer tu propuesta y evaluar posibles formas de colaboración c
   alianza_existente_asesor: { type: "advisor_chat", origen: "alianza_existente" }
 };
 
+app.post("/internal/payphone/approved", async (req, res) => {
+  const secretRecibido = req.get("X-Internal-Webhook-Secret") || "";
+
+  if (!validarWebhookInterno(secretRecibido)) {
+    console.warn("[PAYPHONE_WEBHOOK] Solicitud rechazada por secret invalido.");
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+
+  const payload = req.body || {};
+
+  if (payload.event !== "payphone.payment.approved") {
+    console.warn("[PAYPHONE_WEBHOOK] Evento invalido:", {
+      event: payload.event || null
+    });
+    return res.status(400).json({ ok: false, error: "invalid_event" });
+  }
+
+  const whatsappConversationId = String(payload.whatsapp_conversation_id || "").trim();
+  const bookingId = String(payload.booking_id || "").trim();
+
+  if (!whatsappConversationId || !bookingId) {
+    console.warn("[PAYPHONE_WEBHOOK] Payload incompleto:", {
+      hasWhatsappConversationId: Boolean(whatsappConversationId),
+      hasBookingId: Boolean(bookingId)
+    });
+    return res.status(400).json({ ok: false, error: "missing_required_fields" });
+  }
+
+  const resultado = await enviarConfirmacionPagoPayphoneAprobado(whatsappConversationId, payload);
+
+  if (!resultado.ok) {
+    console.error("[PAYPHONE_WEBHOOK] No se pudo enviar confirmacion WhatsApp:", {
+      bookingId,
+      userHash: hashUsuario(whatsappConversationId),
+      error: resultado.error
+    });
+    return res.status(502).json({ ok: false, error: "whatsapp_send_failed" });
+  }
+
+  console.log("[PAYPHONE_WEBHOOK] Confirmacion enviada:", {
+    bookingId,
+    userHash: hashUsuario(whatsappConversationId),
+    appointmentChannel: payload.appointment_channel || null,
+    paymentMethod: payload.payment_method || null,
+    paymentStatus: payload.payment_status || null
+  });
+  return res.json({ ok: true });
+});
+
+function validarWebhookInterno(secretRecibido) {
+  if (!CHATBOT_WEBHOOK_SECRET || !secretRecibido) {
+    return false;
+  }
+
+  const esperado = Buffer.from(CHATBOT_WEBHOOK_SECRET);
+  const recibido = Buffer.from(secretRecibido);
+
+  return esperado.length === recibido.length && crypto.timingSafeEqual(esperado, recibido);
+}
+
+function valorTextoResumen(value) {
+  const texto = String(value || "").trim();
+  return texto || null;
+}
+
+function normalizarModalidadPayphone(value) {
+  const texto = valorTextoResumen(value);
+
+  if (!texto) {
+    return null;
+  }
+
+  const normalizado = texto
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  if (normalizado.includes("virtual") || normalizado.includes("online") || normalizado.includes("telemed")) {
+    return "Virtual";
+  }
+
+  if (normalizado.includes("presencial")) {
+    return "Presencial";
+  }
+
+  return texto;
+}
+
+function esModalidadVirtualPayphone(value) {
+  return normalizarModalidadPayphone(value) === "Virtual";
+}
+
+function formatearTotalPayphone(value) {
+  const texto = valorTextoResumen(value);
+
+  if (!texto) {
+    return null;
+  }
+
+  return texto.startsWith("$") ? texto : `$${texto}`;
+}
+
+function construirMensajePagoPayphoneAprobadoLegacy(payload) {
+  const summary = payload.summary || {};
+  const lineas = [
+    "✅ Cita registrada correctamente",
+    "",
+    "Hemos recibido el pago de tu cita.",
+    "",
+    `Código de reserva: ${payload.booking_id}`
+  ];
+  const date = valorTextoResumen(summary.date);
+  const timeEc = valorTextoResumen(summary.time_ec);
+  const timePatient = valorTextoResumen(summary.time_patient);
+  const appointmentMode = valorTextoResumen(summary.appointment_mode);
+  const service = valorTextoResumen(summary.service);
+  const professional = valorTextoResumen(summary.professional);
+
+  if (date) lineas.push("", `📅 Fecha: ${date}`);
+  if (timeEc) lineas.push(`🕒 Hora: ${timeEc}`);
+  if (appointmentMode) lineas.push(`🏥 Modalidad: ${appointmentMode}`);
+  if (service) lineas.push(`🩺 Servicio: ${service}`);
+  if (professional) lineas.push(`👨‍⚕️ Profesional: ${professional}`);
+  if (timePatient) lineas.push(`🌎 Hora en tu zona: ${timePatient}`);
+
+  lineas.push("", "Te enviamos el resumen de tu cita al correo registrado.");
+
+  if (summary.is_outside_business_hours === true) {
+    lineas.push(
+      "",
+      "📌 Tu solicitud fue registrada fuera del horario de atención. Nuestro equipo la revisará durante el próximo horario laboral."
+    );
+  }
+
+  return lineas.join("\n");
+}
+
+function construirMensajePagoPayphoneAprobado(payload) {
+  const summary = payload.summary || {};
+  const modalidad = normalizarModalidadPayphone(summary.appointment_mode);
+  const timePatient = valorTextoResumen(summary.time_patient);
+  const patientTimezone = valorTextoResumen(summary.patient_timezone);
+  const total = formatearTotalPayphone(summary.amount);
+  const bloqueFueraHorario = summary.is_outside_business_hours === true
+    ? `
+
+Solicitud registrada fuera de horario laboral.
+Nuestro equipo confirmará su cita durante el próximo horario de atención.
+Horario de atención: Lun-Vie: 7:30 AM - 5:30 PM; Sáb: 8:00 AM - 12:30 PM.`
+    : "";
+  const lineas = [
+    "¡Cita registrada!",
+    "",
+    "El pago de su cita ha sido recibido.",
+    "",
+    `Código de reserva: ${payload.booking_id}`
+  ];
+  const date = valorTextoResumen(summary.date);
+  const timeEc = valorTextoResumen(summary.time_ec);
+  const service = valorTextoResumen(summary.service);
+  const professional = valorTextoResumen(summary.professional);
+
+  if (service) lineas.push(`Servicio: ${service}`);
+  if (professional) lineas.push(`Profesional de salud: ${professional}`);
+  if (modalidad) lineas.push(`Modalidad: ${modalidad}`);
+  if (date) lineas.push(`Fecha: ${date}`);
+  if (timeEc) lineas.push(`Hora Ecuador: ${timeEc}`);
+  if (esModalidadVirtualPayphone(summary.appointment_mode) && timePatient && patientTimezone) {
+    lineas.push(`Hora en tu zona horaria: ${timePatient}`);
+  }
+  if (total) lineas.push(`Total: ${total}`);
+
+  lineas.push(
+    "",
+    "Le enviamos un correo electrónico con el resumen de su cita.",
+    "Guarde su código de reserva para cualquier consulta."
+  );
+
+  if (bloqueFueraHorario) lineas.push(bloqueFueraHorario);
+
+  return lineas.join("\n");
+}
+
+async function enviarConfirmacionPagoPayphoneAprobado(to, payload) {
+  const mensaje = construirMensajePagoPayphoneAprobado(payload);
+  const partes = dividirMensajePorLineas(mensaje);
+
+  for (const parte of partes) {
+    const resultado = await enviarMensajeTextoConResultado(to, parte);
+
+    if (!resultado.ok) {
+      return resultado;
+    }
+  }
+
+  try {
+    await enviarBotones(
+      to,
+      "Puedes volver al menú principal cuando desees.",
+      [botonMenuPrincipal()]
+    );
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.response?.data || error.message };
+  }
+}
+
 // Verificacion del webhook requerida por Meta WhatsApp Cloud API.
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -976,6 +1185,13 @@ function obtenerAsesorLibreExcluyendo(asesorIdExcluido) {
   )) || null;
 }
 
+function obtenerAsesorLibreSinIntentar(asesoresIntentados) {
+  return ASESORES_WHATSAPP.find((asesor) => (
+    !asesoresIntentados.has(asesor.id) &&
+    obtenerSesionAsesor(asesor.id)?.estado === "libre"
+  )) || null;
+}
+
 function obtenerSesionAsesorPorPaciente(paciente) {
   return Array.from(sesionesAsesores.values()).find((sesion) => (
     sesion.paciente === paciente && sesion.estado !== "libre"
@@ -1314,13 +1530,18 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     return;
   }
 
+  if (colaEsperaAsesor.length > 0) {
+    await procesarColaConAsesoresLibres("solicitud_nueva");
+  }
+
   const asesorLibre = obtenerAsesorLibre();
 
-  if (!asesorLibre || colaEsperaAsesor.length > 0) {
+  if (!asesorLibre) {
     if (agregarPacienteAColaAsesor(paciente, origen)) {
       console.log("[COLA_ASESOR] Paciente agregado a cola:", {
         paciente,
         origen,
+        razon: "sin_asesor_libre",
         totalEnCola: colaEsperaAsesor.length
       });
       registrarEvento(paciente, "advisor_queued", {
@@ -1356,6 +1577,12 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     return;
   }
 
+  console.log("[ASESOR] Usuario nuevo entra directo con asesor libre:", {
+    paciente,
+    origen,
+    asesorId: asesorLibre.id,
+    colaPendiente: colaEsperaAsesor.length
+  });
   const sesionAsesor = guardarSesionAsesor(asesorLibre.id, construirSesionAsesorAsignada(asesorLibre, paciente, origen));
   cancelarExpiracionSesion(paciente);
 
@@ -1380,7 +1607,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de servicios para empresas. Por favor espera un momento 😊"
       : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
   );
-  await enviarMensajeTexto(
+  const notificacionAsesor = await enviarMensajeTextoConResultado(
     sesionAsesor.asesor,
     esAlianzaExistente
       ? "📩 Nueva solicitud de atención - ALIADO ESTRATÉGICO EXISTENTE\n\nUn aliado estratégico existente está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
@@ -1394,6 +1621,101 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
   );
+
+  if (!notificacionAsesor.ok) {
+    await manejarFalloNotificacionAsesor({
+      sesionAsesor,
+      paciente,
+      origen,
+      messageId,
+      buttonId,
+      error: notificacionAsesor.error
+    });
+    return;
+  }
+}
+
+function construirMensajeReintentoSolicitudAsesor(origen = "paciente") {
+  return `Nueva solicitud de atencion.\n\n${obtenerEtiquetaOrigenAsesor(origen)} esta esperando atencion.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+}
+
+async function manejarFalloNotificacionAsesor({ sesionAsesor, paciente, origen, messageId, buttonId, error }) {
+  const asesoresIntentados = new Set([sesionAsesor.asesorId]);
+
+  console.error("[ASESOR] Fallo notificando asesor asignado. Sesion liberada:", {
+    asesorId: sesionAsesor.asesorId,
+    asesor: sesionAsesor.asesor,
+    paciente,
+    origen,
+    error
+  });
+  finalizarSesionAsesorPersistidaSeguro(sesionAsesor.asesorId, "notificacion_fallida");
+  resetearSesionAsesor(sesionAsesor.asesorId);
+
+  let asesorAlterno = obtenerAsesorLibreSinIntentar(asesoresIntentados);
+
+  while (asesorAlterno) {
+    const nuevaSesion = guardarSesionAsesor(
+      asesorAlterno.id,
+      construirSesionAsesorAsignada(asesorAlterno, paciente, origen)
+    );
+    cancelarExpiracionSesion(paciente);
+    console.log("[ASESOR] Reintentando notificacion con asesor alterno:", {
+      asesorId: nuevaSesion.asesorId,
+      paciente,
+      origen
+    });
+
+    const resultado = await enviarMensajeTextoConResultado(
+      nuevaSesion.asesor,
+      construirMensajeReintentoSolicitudAsesor(origen)
+    );
+
+    if (resultado.ok) {
+      console.log("[ASESOR] Paciente reasignado tras fallo de notificacion:", {
+        asesorId: nuevaSesion.asesorId,
+        paciente,
+        origen
+      });
+      return true;
+    }
+
+    console.error("[ASESOR] Fallo notificando asesor alterno. Sesion liberada:", {
+      asesorId: nuevaSesion.asesorId,
+      asesor: nuevaSesion.asesor,
+      paciente,
+      origen,
+      error: resultado.error
+    });
+    asesoresIntentados.add(nuevaSesion.asesorId);
+    finalizarSesionAsesorPersistidaSeguro(nuevaSesion.asesorId, "notificacion_fallida");
+    resetearSesionAsesor(nuevaSesion.asesorId);
+    asesorAlterno = obtenerAsesorLibreSinIntentar(asesoresIntentados);
+  }
+
+  if (agregarPacienteAColaAsesor(paciente, origen)) {
+    console.log("[COLA_ASESOR] Paciente agregado a cola por fallo notificando asesores:", {
+      paciente,
+      origen,
+      totalEnCola: colaEsperaAsesor.length
+    });
+    registrarEvento(paciente, "advisor_queued", {
+      messageId,
+      buttonId,
+      flowKey: obtenerFlowKeyAsesor(origen),
+      payload: {
+        origen,
+        queueLength: colaEsperaAsesor.length,
+        reason: "advisor_notification_failed"
+      }
+    });
+  }
+
+  await enviarMensajeTexto(
+    paciente,
+    "En este momento nuestros asesores estan atendiendo otros chats.\n\nTe dejamos en cola y en cuanto haya disponibilidad, un asesor continuara contigo por aqui. Gracias por tu paciencia."
+  );
+  return false;
 }
 
 async function manejarMensajeAsesor(from, rawText, message) {
@@ -2039,6 +2361,32 @@ async function atenderSiguientePacienteEnCola(asesorId) {
       ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
       : "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
   );
+}
+
+async function procesarColaConAsesoresLibres(contexto = "manual") {
+  let asignados = 0;
+
+  for (const asesor of ASESORES_WHATSAPP) {
+    if (colaEsperaAsesor.length === 0) {
+      break;
+    }
+
+    const sesionActual = obtenerSesionAsesor(asesor.id);
+
+    if (sesionActual?.estado !== "libre") {
+      continue;
+    }
+
+    console.log("[COLA_ASESOR] Procesando cola con asesor libre:", {
+      contexto,
+      asesorId: asesor.id,
+      pendientes: colaEsperaAsesor.length
+    });
+    await atenderSiguientePacienteEnCola(asesor.id);
+    asignados += 1;
+  }
+
+  return asignados;
 }
 
 async function manejarMensajePacienteAsesor(from, rawText, message) {
@@ -10203,6 +10551,38 @@ async function enviarMensajeTexto(to, message) {
   }
 }
 
+async function enviarMensajeTextoConResultado(to, message) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: {
+      body: message
+    }
+  };
+
+  console.log("[WHATSAPP_TEXT] Antes await enviarWhatsApp estricto:", {
+    to,
+    length: String(message || "").length
+  });
+
+  try {
+    await enviarWhatsApp(payload);
+    console.log("[WHATSAPP_TEXT] Despues await enviarWhatsApp estricto:", {
+      to,
+      length: String(message || "").length
+    });
+    return { ok: true };
+  } catch (error) {
+    const detalle = error.response?.data || error.message;
+    console.error("[WHATSAPP_TEXT] Error enviando texto estricto:", {
+      to,
+      error: detalle
+    });
+    return { ok: false, error: detalle };
+  }
+}
+
 function esMensajeMultimedia(message) {
   return ["image", "video", "audio", "document", "sticker"].includes(message?.type);
 }
@@ -10512,6 +10892,22 @@ function fechaPersistidaAMs(value, fallback = Date.now()) {
   return Number.isFinite(timestamp) ? timestamp : fallback;
 }
 
+function obtenerTimestampRestauracionAsesor(row) {
+  if (row?.estado === "conectado") {
+    return fechaPersistidaAMs(row.actualizado_en || row.conectado_en || row.asignado_en || row.creado_en);
+  }
+
+  if (row?.estado === "esperando_nombre" || row?.estado === "esperando_nombre_cargo") {
+    return fechaPersistidaAMs(row.actualizado_en || row.asignado_en || row.creado_en);
+  }
+
+  return fechaPersistidaAMs(row?.actualizado_en || row?.creado_en);
+}
+
+function esEstadoAsesorRestauradoVencido(row, now = Date.now()) {
+  return now - obtenerTimestampRestauracionAsesor(row) > TIEMPO_RESTAURACION_ASESOR_MS;
+}
+
 function construirSesionAsesorDesdePersistencia(row) {
   const asesor = ASESORES_WHATSAPP.find((item) => item.id === row.asesor_id);
 
@@ -10580,10 +10976,22 @@ async function restaurarEstadoAsesoresDesdeBD() {
 
   try {
     const estado = await obtenerEstadoAsesoresPersistido();
+    const now = Date.now();
 
     colaEsperaAsesor.length = 0;
     for (const item of estado.cola || []) {
       if (!item.paciente_phone || pacienteEstaEnColaAsesor(item.paciente_phone)) {
+        continue;
+      }
+
+      if (esEstadoAsesorRestauradoVencido(item, now)) {
+        console.log("[ASESOR_DB] Cola restaurada descartada por antiguedad:", {
+          paciente: item.paciente_phone,
+          origen: item.origen || "paciente",
+          estado: item.estado,
+          edadMs: now - obtenerTimestampRestauracionAsesor(item)
+        });
+        eliminarColaAsesorSeguro(item.paciente_phone);
         continue;
       }
 
@@ -10595,6 +11003,17 @@ async function restaurarEstadoAsesoresDesdeBD() {
     }
 
     for (const row of estado.sesiones || []) {
+      if (esEstadoAsesorRestauradoVencido(row, now)) {
+        console.log("[ASESOR_DB] Sesion restaurada descartada por antiguedad:", {
+          asesorId: row.asesor_id,
+          paciente: row.paciente_phone,
+          estado: row.estado,
+          edadMs: now - obtenerTimestampRestauracionAsesor(row)
+        });
+        finalizarSesionAsesorPersistidaSeguro(row.asesor_id, "restauracion_expirada");
+        continue;
+      }
+
       const sesion = construirSesionAsesorDesdePersistencia(row);
 
       if (!sesion) {
@@ -10611,6 +11030,15 @@ async function restaurarEstadoAsesoresDesdeBD() {
       } else if (esSesionEsperandoAceptacionAsesor(sesion)) {
         reiniciarTemporizadorAceptacionAsesor(sesion.asesorId);
       }
+    }
+
+    const asignadosDesdeCola = await procesarColaConAsesoresLibres("restauracion_bd");
+
+    if (asignadosDesdeCola > 0) {
+      console.log("[ASESOR_DB] Cola restaurada procesada al iniciar:", {
+        asignados: asignadosDesdeCola,
+        pendientes: colaEsperaAsesor.length
+      });
     }
 
     console.log("[ASESOR_DB] Estado restaurado:", {
