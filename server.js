@@ -712,6 +712,51 @@ function formatearTotalPayphone(value) {
   return texto.startsWith("$") ? texto : `$${texto}`;
 }
 
+function formatearFechaPayphoneEcuador(value) {
+  const texto = valorTextoResumen(value);
+
+  if (!texto) {
+    return null;
+  }
+
+  const match = texto.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const fecha = match
+    ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0))
+    : new Date(texto);
+
+  if (Number.isNaN(fecha.getTime())) {
+    return texto;
+  }
+
+  const formateada = new Intl.DateTimeFormat("es-EC", {
+    timeZone: "America/Guayaquil",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(fecha);
+
+  return formateada.charAt(0).toLocaleUpperCase("es-EC") + formateada.slice(1);
+}
+
+function formatearHoraPayphoneModal(value) {
+  const texto = valorTextoResumen(value);
+
+  if (!texto) {
+    return null;
+  }
+
+  return texto
+    .replace(/\s*\((?:Ecuador|GMT-5|UTC-5)[^)]+\)\s*/gi, "")
+    .replace(/\s*\(Ecuador\)\s*/gi, "")
+    .replace(/\ba\.\s*m\./gi, "AM")
+    .replace(/\bp\.\s*m\./gi, "PM")
+    .replace(/\ba\.m\./gi, "AM")
+    .replace(/\bp\.m\./gi, "PM")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function construirMensajePagoPayphoneAprobadoLegacy(payload) {
   const summary = payload.summary || {};
   const lineas = [
@@ -747,7 +792,7 @@ function construirMensajePagoPayphoneAprobadoLegacy(payload) {
   return lineas.join("\n");
 }
 
-function construirMensajePagoPayphoneAprobado(payload) {
+function construirMensajePagoPayphoneAprobadoLegacyModal(payload) {
   const summary = payload.summary || {};
   const modalidad = normalizarModalidadPayphone(summary.appointment_mode);
   const timePatient = valorTextoResumen(summary.time_patient);
@@ -785,6 +830,58 @@ Horario de atención: Lun-Vie: 7:30 AM - 5:30 PM; Sáb: 8:00 AM - 12:30 PM.`
   lineas.push(
     "",
     "Le enviamos un correo electrónico con el resumen de su cita.",
+    "Guarde su código de reserva para cualquier consulta."
+  );
+
+  if (bloqueFueraHorario) lineas.push(bloqueFueraHorario);
+
+  return lineas.join("\n");
+}
+
+function construirMensajePagoPayphoneAprobado(payload) {
+  const summary = payload.summary || {};
+  const modalidad = normalizarModalidadPayphone(summary.appointment_mode);
+  const timePatient = valorTextoResumen(summary.time_patient);
+  const total = formatearTotalPayphone(summary.amount);
+  const bloqueFueraHorario = summary.is_outside_business_hours === true
+    ? `
+
+Solicitud registrada fuera de horario laboral.
+Nuestro equipo confirmará su cita durante el próximo horario de atención.
+Horario de atención: Lun-Vie: 7:30 AM - 5:30 PM; Sáb: 8:00 AM - 12:30 PM.`
+    : "";
+  const lineas = [
+    "¡Cita registrada!",
+    "",
+    "¡Gracias por preferir a FamySALUD!",
+    "",
+    "Su cita fue registrada correctamente y se encuentra pendiente de confirmación.",
+    "El pago de su cita ha sido recibido.",
+    "",
+    `Código de reserva: ${payload.booking_id}`,
+    "Estado: Pagada"
+  ];
+  const date = formatearFechaPayphoneEcuador(summary.date);
+  const timeEc = formatearHoraPayphoneModal(summary.time_ec);
+  const service = valorTextoResumen(summary.service);
+  const professional = valorTextoResumen(summary.professional);
+
+  if (service) lineas.push(`Servicio: ${service}`);
+  if (professional) lineas.push(`Profesional de salud: ${professional}`);
+  if (modalidad) lineas.push(`Modalidad: ${modalidad}`);
+  if (date) lineas.push(`Fecha: ${date}`);
+  if (timeEc) lineas.push(`Hora: ${timeEc}`);
+  lineas.push("Zona horaria: GMT-5 (Ecuador) (zona horaria de Ecuador)");
+  if (esModalidadVirtualPayphone(summary.appointment_mode) && timePatient) {
+    lineas.push(`Hora en tu zona horaria: ${timePatient}`);
+  }
+  if (total) lineas.push(`Total: ${total}`);
+
+  lineas.push(
+    "",
+    "Le enviamos un correo electrónico con el resumen de su cita.",
+    "Recibirá un segundo correo cuando su cita haya sido confirmada.",
+    "",
     "Guarde su código de reserva para cualquier consulta."
   );
 
