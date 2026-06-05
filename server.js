@@ -2632,6 +2632,14 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
     return;
   }
 
+  if (sesion.paso === "pago_tarjeta_enlace_generado") {
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajePagoTarjetaGeneradoAgendamiento(sesion.paymentUrl)
+    );
+    return;
+  }
+
   if (sesion.paso === "transferencia_completa_pendiente_registro") {
     await enviarMensajeAgendamientoConNavegacion(
       from,
@@ -4285,19 +4293,11 @@ async function manejarTerminosPagoAgendamiento(from, text, messageId, sesion, bu
   }
 
   if (sesion.paymentMethod === "card") {
-    const sesionTarjeta = {
+    await manejarCreacionPagoTarjetaAgendamiento(from, messageId, {
       ...sesion,
-      paso: "pago_tarjeta_pendiente_integracion",
       paymentTermsAccepted: true,
-      transferTermsAccepted: false,
-      timestamp: Date.now()
-    };
-
-    guardarSesionAgendamiento(from, sesionTarjeta);
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      construirMensajePagoTarjetaPendienteIntegracionAgendamiento()
-    );
+      transferTermsAccepted: false
+    });
     return;
   }
 
@@ -4560,6 +4560,136 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
   }
 }
 
+async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
+  const erroresSesion = validarSesionTarjetaListaParaPagoAgendamiento(sesion);
+
+  if (erroresSesion.length) {
+    console.warn("[AGENDAMIENTO_TARJETA] Datos incompletos antes de crear pago:", {
+      missing: erroresSesion,
+      professionalId: sesion?.professionalId || null,
+      serviceId: sesion?.serviceId || null,
+      appointmentDate: sesion?.appointmentDate || null
+    });
+
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentTermsAccepted: false,
+      transferTermsAccepted: false,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pudimos generar el enlace de pago en este momento.\n\nPor favor intenta nuevamente o selecciona otro m\u00e9todo de pago."
+    );
+    return;
+  }
+
+  if (!APPWEB_CHATBOT_API_KEY) {
+    console.warn("[AGENDAMIENTO_TARJETA] Falta APPWEB_CHATBOT_API_KEY para crear pago.");
+
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentTermsAccepted: false,
+      transferTermsAccepted: false,
+      timestamp: Date.now()
+    });
+
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pudimos generar el enlace de pago en este momento.\n\nPor favor intenta nuevamente o selecciona otro m\u00e9todo de pago."
+    );
+    return;
+  }
+
+  try {
+    console.log("[AGENDAMIENTO_TARJETA] Creando enlace de pago en Laravel:", {
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId,
+      appointmentDate: sesion.appointmentDate,
+      appointmentTime: sesion.appointmentTime,
+      amount: sesion.paymentAmountStandard
+    });
+
+    const response = await crearPagoTarjetaChatbot(sesion, from);
+    const data = response.data || {};
+    const paymentUrl = data.payment_url || data.paymentUrl || null;
+
+    if (response.status >= 200 && response.status < 300 && data.ok === true && paymentUrl) {
+      const sesionPagoTarjeta = {
+        ...sesion,
+        paso: "pago_tarjeta_enlace_generado",
+        paymentTermsAccepted: true,
+        transferTermsAccepted: false,
+        paymentUrl,
+        clientTransactionId: data.clientTransactionId || data.client_transaction_id || null,
+        paymentHoldId: data.hold_id || data.holdId || null,
+        paymentExpiresAt: data.expires_at || data.expiresAt || null,
+        appointmentHoldId: data.hold_id || data.holdId || sesion.appointmentHoldId || null,
+        appointmentHoldExpiresAt: data.expires_at || data.expiresAt || sesion.appointmentHoldExpiresAt || null,
+        timestamp: Date.now()
+      };
+
+      guardarSesionAgendamiento(from, sesionPagoTarjeta);
+
+      registrarEvento(from, "flow_completed", {
+        messageId,
+        flowKey: "agendamiento_tarjeta",
+        payload: {
+          action: "card_payment_link_created",
+          clientTransactionId: sesionPagoTarjeta.clientTransactionId,
+          paymentHoldId: sesionPagoTarjeta.paymentHoldId
+        }
+      });
+
+      await enviarMensajeAgendamientoConNavegacion(
+        from,
+        construirMensajePagoTarjetaGeneradoAgendamiento(paymentUrl)
+      );
+      return;
+    }
+
+    console.warn("[AGENDAMIENTO_TARJETA] Respuesta inesperada de Laravel al crear pago:", {
+      status: response.status,
+      ok: data.ok ?? null,
+      hasPaymentUrl: Boolean(paymentUrl),
+      responseBody: response.data ?? null,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    });
+  } catch (error) {
+    console.warn("[AGENDAMIENTO_TARJETA] Error creando pago en Laravel:", {
+      status: error.response?.status || null,
+      code: error.code || null,
+      message: error.message,
+      responseBody: error.response?.data ?? null,
+      professionalId: sesion.professionalId,
+      serviceId: sesion.serviceId
+    });
+  }
+
+  guardarSesionAgendamiento(from, {
+    ...sesion,
+    paso: "seleccionando_metodo_pago",
+    paymentMethod: null,
+    paymentAmount: null,
+    paymentTermsAccepted: false,
+    transferTermsAccepted: false,
+    timestamp: Date.now()
+  });
+
+  await enviarMensajeAgendamientoConNavegacion(
+    from,
+    "No pudimos generar el enlace de pago en este momento.\n\nPor favor intenta nuevamente o selecciona otro m\u00e9todo de pago."
+  );
+}
+
 async function volverAgendamiento(to, messageId) {
   const sesion = obtenerSesionAgendamiento(to);
   console.log("[AGENDAMIENTO_FLOW_DEBUG] Volver atras recibido:", {
@@ -4718,7 +4848,7 @@ async function volverAgendamiento(to, messageId) {
     return;
   }
 
-  if (sesion?.paso === "pago_tarjeta_pendiente_integracion") {
+  if (sesion?.paso === "pago_tarjeta_pendiente_integracion" || sesion?.paso === "pago_tarjeta_enlace_generado") {
     console.log("[AGENDAMIENTO_FLOW_DEBUG] Destino volver atras:", {
       estadoActual: sesion.paso,
       estadoDestino: "aceptando_terminos_pago"
@@ -4727,6 +4857,10 @@ async function volverAgendamiento(to, messageId) {
       ...sesion,
       paso: "aceptando_terminos_pago",
       paymentTermsAccepted: false,
+      paymentUrl: null,
+      clientTransactionId: null,
+      paymentHoldId: null,
+      paymentExpiresAt: null,
       timestamp: Date.now()
     });
     await enviarTerminosPagoAgendamiento(to);
@@ -8454,6 +8588,16 @@ Has aceptado los términos y condiciones.
 En el siguiente paso continuaremos con la generación del enlace de pago seguro para completar tu reserva.`;
 }
 
+function construirMensajePagoTarjetaGeneradoAgendamiento(paymentUrl) {
+  return `💳 Pago con tarjeta
+
+Para completar tu agendamiento, realiza el pago seguro en el siguiente enlace:
+
+${paymentUrl}
+
+Una vez aprobado el pago, tu cita se registrará automáticamente.`;
+}
+
 function construirMensajeTerminosTransferenciaAgendamiento() {
   return `📋 Términos y condiciones
 
@@ -8789,6 +8933,38 @@ function validarSesionTransferenciaListaParaRegistroAgendamiento(sesion) {
   return missing;
 }
 
+function validarSesionTarjetaListaParaPagoAgendamiento(sesion) {
+  const required = {
+    professionalId: sesion?.professionalId || sesion?.employeeId,
+    serviceId: sesion?.serviceId,
+    appointmentDate: sesion?.appointmentDate,
+    appointmentTime: sesion?.appointmentTime,
+    appointmentEndTime: sesion?.appointmentEndTime,
+    appointmentMode: sesion?.appointmentMode,
+    patientFullName: sesion?.patientFullName,
+    patientEmail: sesion?.patientEmail,
+    patientPhone: sesion?.patientPhone,
+    paymentAmountStandard: sesion?.paymentAmountStandard
+  };
+  const missing = Object.entries(required)
+    .filter(([, value]) => value === null || value === undefined || value === "")
+    .map(([key]) => key);
+
+  if (sesion?.paymentTermsAccepted !== true) {
+    missing.push("paymentTermsAccepted");
+  }
+
+  if (sesion?.dataConsent !== true) {
+    missing.push("dataConsent");
+  }
+
+  if (!Number.isFinite(Number(sesion?.paymentAmountStandard)) || Number(sesion.paymentAmountStandard) <= 0) {
+    missing.push("paymentAmountStandardValid");
+  }
+
+  return missing;
+}
+
 async function descargarComprobanteTransferenciaWhatsApp(transferReceipt) {
   if (!transferReceipt?.mediaId) {
     throw new Error("Comprobante sin mediaId.");
@@ -8901,9 +9077,40 @@ async function enviarRegistroTransferenciaLaravel(sesion, comprobante) {
   });
 }
 
-function construirCamposRegistroTransferenciaAgendamiento(sesion) {
+async function crearPagoTarjetaChatbot(sesion, from) {
+  const url = construirAppWebApiUrl("/api/chatbot/payphone/create");
+  const payload = construirPayloadPagoTarjetaChatbot(sesion, from);
+
+  console.log("[AGENDAMIENTO_TARJETA] Payload preparado para crear pago:", {
+    appointment_hold_id: payload.appointment_hold_id || null,
+    employee_id: payload.employee_id || null,
+    service_id: payload.service_id || null,
+    appointment_date: payload.appointment_date || null,
+    appointment_time: payload.appointment_time || null
+  });
+
+  return axios.post(url, payload, {
+    timeout: 20000,
+    validateStatus: () => true,
+    headers: {
+      "X-Chatbot-Api-Key": APPWEB_CHATBOT_API_KEY
+    }
+  });
+}
+
+function construirPayloadPagoTarjetaChatbot(sesion, from) {
   return {
-    employee_id: sesion.professionalId,
+    ...construirCamposComunesPagoAgendamiento(sesion),
+    appointment_hold_id: sesion.appointmentHoldId || null,
+    amount: sesion.paymentAmountStandard,
+    data_consent: sesion.dataConsent === true,
+    whatsapp_conversation_id: from
+  };
+}
+
+function construirCamposComunesPagoAgendamiento(sesion) {
+  return {
+    employee_id: sesion.professionalId || sesion.employeeId,
     service_id: sesion.serviceId,
     appointment_date: sesion.appointmentDate,
     appointment_time: sesion.appointmentTime,
@@ -8912,16 +9119,6 @@ function construirCamposRegistroTransferenciaAgendamiento(sesion) {
     patient_full_name: sesion.patientFullName,
     patient_email: sesion.patientEmail,
     patient_phone: sesion.patientPhone,
-    amount: sesion.paymentAmount,
-    amount_standard: sesion.paymentAmountStandard,
-    discount_amount: sesion.paymentDiscountAmount,
-    payment_method: "transfer",
-    status: "pending_verification",
-    data_consent: "1",
-    transfer_bank_origin: sesion.transferOriginBank,
-    transfer_payer_name: sesion.transferPayerName,
-    transfer_date: sesion.transferDate,
-    transfer_reference: sesion.transferReference,
     patient_timezone: sesion.patientTimezone,
     patient_timezone_label: sesion.patientTimezoneLabel,
     patient_doc_type: sesion.patientDocType,
@@ -8935,6 +9132,22 @@ function construirCamposRegistroTransferenciaAgendamiento(sesion) {
     billing_address: sesion.billingAddress,
     billing_email: sesion.billingEmail,
     billing_phone: sesion.billingPhone
+  };
+}
+
+function construirCamposRegistroTransferenciaAgendamiento(sesion) {
+  return {
+    ...construirCamposComunesPagoAgendamiento(sesion),
+    amount: sesion.paymentAmount,
+    amount_standard: sesion.paymentAmountStandard,
+    discount_amount: sesion.paymentDiscountAmount,
+    payment_method: "transfer",
+    status: "pending_verification",
+    data_consent: "1",
+    transfer_bank_origin: sesion.transferOriginBank,
+    transfer_payer_name: sesion.transferPayerName,
+    transfer_date: sesion.transferDate,
+    transfer_reference: sesion.transferReference
   };
 }
 
