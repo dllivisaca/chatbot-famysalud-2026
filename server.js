@@ -5646,9 +5646,33 @@ async function volverAgendamiento(to, messageId) {
     }
   }
 
+  if (sesion?.paso === "capturando_nombre_paciente"
+    && Array.isArray(sesion.horariosDisponibles)
+    && sesion.horariosDisponibles.length) {
+    if (sesion.appointmentHoldId) {
+      liberarHoldAgendamientoSeguro(to, sesion.appointmentHoldId, obtenerSessionId(to));
+    }
+
+    guardarSesionAgendamiento(to, {
+      ...sesion,
+      paso: "seleccionando_horario",
+      appointmentTime: null,
+      appointmentEndTime: null,
+      appointmentTimeLabel: null,
+      appointmentHoldId: null,
+      appointmentHoldExpiresAt: null,
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacionSeguro(
+      to,
+      construirMensajeHorariosAgendamiento(sesion, sesion.horariosDisponibles),
+      "seleccionando_horario"
+    );
+    return;
+  }
+
   if ((sesion?.paso === "seleccionando_horario"
-    || sesion?.paso === "confirmando_turno"
-    || sesion?.paso === "capturando_nombre_paciente")
+    || sesion?.paso === "confirmando_turno")
     && Array.isArray(sesion.fechasDisponibles)
     && sesion.fechasDisponibles.length) {
     if (sesion.appointmentHoldId) {
