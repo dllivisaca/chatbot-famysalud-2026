@@ -151,8 +151,10 @@ const INTERVALO_REVISION_FERIADOS_MS = 60 * 1000;
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_ACEPTACION_ASESOR_MS = 3 * 60 * 1000;
 const TIEMPO_RESTAURACION_ASESOR_MS = 30 * 60 * 1000;
+const INTERVALO_AVISO_COLA_ASESOR_MS = 15 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
+const ultimosAvisosColaAsesor = new Map();
 const temporizadoresSesionAsesor = new Map();
 const temporizadoresAceptacionAsesor = new Map();
 const persistenciasAsesorPendientes = new Map();
@@ -540,6 +542,8 @@ Sáb: 8:00AM - 12:30PM
 Será un gusto atenderte 💙` },
   paciente_hablar_asesor: { type: "advisor_chat", origen: "paciente" },
   paciente_asesor: { type: "text", text: "En breve te comunicaremos con un asesor de FamySALUD." },
+  advisor_queue_wait: { type: "advisor_queue_wait" },
+  advisor_queue_main_menu: { type: "advisor_queue_main_menu" },
 
   empresa_salud_ocupacional: { type: "text_with_main_menu", text: `🏢 Gracias por tu interés en nuestros servicios de Salud Ocupacional.
 
@@ -2127,6 +2131,71 @@ function pacienteEstaEnColaAsesor(numero) {
   return colaEsperaAsesor.some((item) => item.paciente === numero);
 }
 
+function botonesColaAsesor() {
+  return [
+    boton("advisor_queue_wait", "Seguir esperando"),
+    boton("advisor_queue_main_menu", "Men\u00fa principal")
+  ];
+}
+
+async function enviarOpcionesColaAsesor(to, mensaje) {
+  ultimosAvisosColaAsesor.set(to, Date.now());
+  await enviarBotones(to, mensaje, botonesColaAsesor());
+}
+
+async function enviarOpcionesColaAsesorSiNoReciente(to, mensaje) {
+  const ultimoAviso = ultimosAvisosColaAsesor.get(to) || 0;
+  const ahora = Date.now();
+
+  if (ahora - ultimoAviso < INTERVALO_AVISO_COLA_ASESOR_MS) {
+    return;
+  }
+
+  await enviarOpcionesColaAsesor(to, mensaje);
+}
+
+function quitarPacienteDeColaAsesor(paciente) {
+  const index = colaEsperaAsesor.findIndex((item) => item.paciente === paciente);
+
+  if (index === -1) {
+    return false;
+  }
+
+  colaEsperaAsesor.splice(index, 1);
+  ultimosAvisosColaAsesor.delete(paciente);
+  eliminarColaAsesorSeguro(paciente);
+  return true;
+}
+
+async function manejarColaAsesorSeguirEsperando(paciente) {
+  if (!pacienteEstaEnColaAsesor(paciente) && obtenerSesionAsesorPorPaciente(paciente)) {
+    return;
+  }
+
+  console.log("[COLA_ASESOR] Paciente decide seguir esperando", { paciente });
+  await enviarMensajeTexto(
+    paciente,
+    "Perfecto, te mantenemos en cola. Te avisaremos cuando un asesor est\u00e9 disponible \uD83D\uDC99"
+  );
+}
+
+async function manejarColaAsesorMenuPrincipal(paciente) {
+  const removido = quitarPacienteDeColaAsesor(paciente);
+
+  if (!removido && obtenerSesionAsesorPorPaciente(paciente)) {
+    return;
+  }
+
+  console.log("[COLA_ASESOR] Paciente sale de cola y vuelve al menu", {
+    paciente,
+    removido,
+    totalEnCola: colaEsperaAsesor.length
+  });
+
+  actualizarSesionUsuario(paciente);
+  await enviarMenu(paciente, "principal");
+}
+
 function estaEnFlujoAsesor(phone) {
   return pacienteEstaEnColaAsesor(phone) || Boolean(obtenerSesionAsesorPorPaciente(phone));
 }
@@ -2143,7 +2212,7 @@ async function manejarMensajeUsuarioEnEsperaAsesor(from) {
   }
 
   if (pacienteEstaEnColaAsesor(from)) {
-    await enviarMensajeTexto(
+    await enviarOpcionesColaAsesor(
       from,
       "💬 Sigues en la cola de espera.\n\nTe avisaremos apenas un asesor esté disponible 😊"
     );
@@ -2279,7 +2348,7 @@ async function expirarAceptacionAsesorPorInactividad(asesorId) {
   });
 
   try {
-    await enviarMensajeTexto(
+    await enviarOpcionesColaAsesorSiNoReciente(
       paciente,
       "⏳ Seguimos buscando un asesor disponible para continuar contigo. Gracias por tu paciencia 💙"
     );
@@ -2416,6 +2485,7 @@ async function atenderSiguientePacienteEnCola(asesorId) {
 
   const siguiente = colaEsperaAsesor.shift();
   eliminarColaAsesorSeguro(siguiente.paciente);
+  ultimosAvisosColaAsesor.delete(siguiente.paciente);
   const waitMs = Math.max(Date.now() - (siguiente.creadoEn || Date.now()), 0);
 
   const sesionAsesor = guardarSesionAsesor(
@@ -2605,6 +2675,16 @@ async function manejarBoton(to, buttonId, messageId) {
     limpiarSesionesUsuario(to);
     actualizarSesionUsuario(to);
     await enviarMenu(to, "principal");
+    return;
+  }
+
+  if (accion.type === "advisor_queue_wait") {
+    await manejarColaAsesorSeguirEsperando(to);
+    return;
+  }
+
+  if (accion.type === "advisor_queue_main_menu") {
+    await manejarColaAsesorMenuPrincipal(to);
     return;
   }
 
