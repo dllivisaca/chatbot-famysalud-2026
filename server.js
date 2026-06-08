@@ -653,6 +653,8 @@ app.post("/internal/payphone/approved", async (req, res) => {
     return res.status(502).json({ ok: false, error: "whatsapp_send_failed" });
   }
 
+  eliminarSesionAgendamiento(whatsappConversationId);
+
   console.log("[PAYPHONE_WEBHOOK] Confirmacion enviada:", {
     bookingId,
     userHash: hashUsuario(whatsappConversationId),
@@ -9190,7 +9192,7 @@ Responde con el número de la opción.`;
 function construirMensajeTransferenciaPendienteRegistroAgendamiento() {
   return `Datos de transferencia recibidos.
 
-El flujo queda listo en estado transferencia_completa_pendiente_registro. Falta configurar o completar la conexión con el registro final de la cita con transferencia en Laravel.`;
+Estamos intentando completar el registro final de tu cita con transferencia. Si el problema persiste, por favor contacta a un asesor de FamySALUD.`;
 }
 
 function construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion) {
