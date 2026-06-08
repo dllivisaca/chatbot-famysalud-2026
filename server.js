@@ -79,6 +79,7 @@ const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CAT
 const CATALOG_CACHE_DIR = path.join(__dirname, "data");
 const CATALOG_CACHE_FILE = path.join(CATALOG_CACHE_DIR, "catalogo-servicios.json");
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
+const INTERVALO_LIMPIEZA_AGENDAMIENTO_MS = 60 * 1000;
 const AGENDAMIENTO_WHATSAPP_HOLD_TTL_MS = 30 * 60 * 1000;
 const TRANSFER_RECEIPT_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_OPCIONES_LISTA_WHATSAPP = 10;
@@ -178,6 +179,7 @@ let catalogoServiciosCache = null;
 let catalogoServiciosCacheTimestamp = 0;
 let catalogoServiciosRefreshInterval = null;
 let feriadosRevisionInterval = null;
+let agendamientoLimpiezaInterval = null;
 let feriadosRevisionEnCurso = false;
 let ultimaRevisionRecordatorioFeriados = null;
 const ZONAS_HORARIAS_AGENDAMIENTO = [
@@ -7808,6 +7810,33 @@ function consumirSesionUsuarioExpirada(from) {
   return true;
 }
 
+function limpiarSesionesAgendamientoExpiradas() {
+  for (const [phone, sesion] of sesionesAgendamiento.entries()) {
+    if (!sesionExpirada(sesion)) {
+      continue;
+    }
+
+    const sessionId = obtenerSessionId(phone);
+    console.log("[AGENDAMIENTO] Sesion expirada por inactividad. Liberando hold asociado:", {
+      phone,
+      appointmentHoldId: sesion.appointmentHoldId || null
+    });
+    eliminarSesionAgendamiento(phone, sessionId);
+  }
+}
+
+function programarLimpiezaSesionesAgendamientoExpiradas() {
+  if (agendamientoLimpiezaInterval) {
+    clearInterval(agendamientoLimpiezaInterval);
+  }
+
+  agendamientoLimpiezaInterval = setInterval(() => {
+    limpiarSesionesAgendamientoExpiradas();
+  }, INTERVALO_LIMPIEZA_AGENDAMIENTO_MS);
+
+  limpiarSesionesAgendamientoExpiradas();
+}
+
 function obtenerSesionCotizacion(from) {
   return sesionesCotizacion.get(from) || null;
 }
@@ -11495,6 +11524,7 @@ Promise.all([
     console.log(`[CONFIG] Agendamiento habilitado: ${featureHabilitada(ENABLE_APPOINTMENT_BOOKING)}`);
     console.log(`[CONFIG] IA habilitada: ${featureHabilitada(ENABLE_AI_RESPONSES)}`);
     inicializarCatalogoServicios();
+    programarLimpiezaSesionesAgendamientoExpiradas();
     programarRevisionFeriados();
   });
 });
