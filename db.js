@@ -845,10 +845,26 @@ async function obtenerSesionesAgendamientoPersistidas() {
   return rows || [];
 }
 
+async function eliminarHoldsExpiradosAgendamiento() {
+  if (!dbConfigurada()) {
+    return 0;
+  }
+
+  const [result] = await ejecutarAgendamientoQuery(
+    "DELETE FROM famysufk_appointments.appointment_holds WHERE expires_at <= NOW()",
+    [],
+    "appointment_holds_expired_delete"
+  );
+
+  return result?.affectedRows || 0;
+}
+
 async function obtenerHoldsActivosAgendamiento(filtros) {
   if (!dbConfigurada()) {
     return [];
   }
+
+  await eliminarHoldsExpiradosAgendamiento();
 
   const [rows] = await ejecutarAgendamientoQuery(
     `SELECT id, session_id, employee_id, service_id, appointment_date,
@@ -872,6 +888,8 @@ async function crearHoldAgendamientoPersistido(hold) {
     return null;
   }
 
+  await eliminarHoldsExpiradosAgendamiento();
+
   const connection = await pool.getConnection();
   const createdAt = obtenerFechaHoraMysqlEcuador();
   const expiresAt = obtenerFechaHoraMysqlEcuador(new Date(hold.expiresAtMs));
@@ -879,8 +897,6 @@ async function crearHoldAgendamientoPersistido(hold) {
   try {
     await connection.query(`SET time_zone = '${DB_TIMEZONE}'`);
     await connection.beginTransaction();
-
-    await connection.execute("DELETE FROM famysufk_appointments.appointment_holds WHERE expires_at <= NOW()");
 
     const [citas] = await connection.execute(
       `SELECT id

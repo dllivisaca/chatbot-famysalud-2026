@@ -5145,6 +5145,31 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
     return;
   }
 
+  if (sesion.paymentUrl && sesion.clientTransactionId) {
+    const paymentExpiresAtMs = sesion.paymentExpiresAt ? Date.parse(sesion.paymentExpiresAt) : null;
+
+    if (Number.isFinite(paymentExpiresAtMs) && paymentExpiresAtMs <= Date.now()) {
+      eliminarSesionAgendamiento(from);
+      await enviarMensajeTexto(
+        from,
+        "El enlace de pago anterior expiró. Por favor vuelve al menú principal e inicia nuevamente el agendamiento."
+      );
+      await enviarMenu(from, "principal");
+      return;
+    }
+
+    guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "pago_tarjeta_enlace_generado",
+      timestamp: Date.now()
+    });
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajePagoTarjetaGeneradoAgendamiento(sesion.paymentUrl)
+    );
+    return;
+  }
+
   if (!APPWEB_CHATBOT_API_KEY) {
     console.warn("[AGENDAMIENTO_TARJETA] Falta APPWEB_CHATBOT_API_KEY para crear pago.");
 
@@ -5414,10 +5439,6 @@ async function volverAgendamiento(to, messageId) {
       ...sesion,
       paso: "aceptando_terminos_pago",
       paymentTermsAccepted: false,
-      paymentUrl: null,
-      clientTransactionId: null,
-      paymentHoldId: null,
-      paymentExpiresAt: null,
       timestamp: Date.now()
     });
     await enviarTerminosPagoAgendamiento(to);
