@@ -151,7 +151,7 @@ const INTERVALO_REVISION_FERIADOS_MS = 60 * 1000;
 const TIEMPO_EXPIRACION_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_ACEPTACION_ASESOR_MS = 3 * 60 * 1000;
 const TIEMPO_RESTAURACION_ASESOR_MS = 30 * 60 * 1000;
-const INTERVALO_AVISO_COLA_ASESOR_MS = 15 * 60 * 1000;
+const INTERVALO_AVISO_COLA_ASESOR_MS = 10 * 60 * 1000;
 const TIEMPO_EXPIRACION_PROVEEDOR_MS = 15 * 60 * 1000;
 const colaEsperaAsesor = [];
 const ultimosAvisosColaAsesor = new Map();
@@ -984,7 +984,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (await manejarMensajeUsuarioEnEsperaAsesor(from)) {
+    if (!["advisor_queue_wait", "advisor_queue_main_menu"].includes(buttonId) && await manejarMensajeUsuarioEnEsperaAsesor(from)) {
       return res.sendStatus(200);
     }
 
