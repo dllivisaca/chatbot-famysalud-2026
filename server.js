@@ -119,6 +119,8 @@ const BANCOS_ORIGEN_TRANSFERENCIA = [
 const TEXTO_LEGAL_TRANSFERENCIA = "Al continuar con el proceso, usted acepta que los pagos no son reembolsables. Las citas podrán ser reagendadas según disponibilidad, siempre que se notifique con un mínimo de 4 horas de anticipación al turno agendado. De no realizarse la notificación dentro del tiempo establecido, se aplicará una penalidad del 25% del valor pagado.";
 const BOTON_TRANSFERENCIA_TERMINOS_ACEPTO = "transfer_terms_accept";
 const BOTON_TRANSFERENCIA_TERMINOS_NO_ACEPTO = "transfer_terms_decline";
+const BOTON_PAGO_TARJETA_NUEVO = "card_payment_new";
+const BOTON_PAGO_TARJETA_CAMBIAR = "card_payment_change";
 const sesionesUsuarios = new Map();
 const sesionesCotizacion = new Map();
 const sesionesAgendamiento = new Map();
@@ -1049,7 +1051,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (!listReplyId && estaEnFlujoAgendamiento(from) && (!buttonId || esBotonTerminosTransferenciaAgendamiento(buttonId))) {
+    if (!listReplyId && estaEnFlujoAgendamiento(from) && (!buttonId || esBotonTerminosTransferenciaAgendamiento(buttonId) || esBotonPagoTarjetaAgendamiento(buttonId))) {
       await manejarFlujoAgendamiento(from, rawText, messageId, message, buttonId);
       return res.sendStatus(200);
     }
@@ -3190,10 +3192,7 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
   }
 
   if (sesion.paso === "pago_tarjeta_enlace_generado") {
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      construirMensajePagoTarjetaGeneradoAgendamiento(sesion.paymentUrl)
-    );
+    await manejarPagoTarjetaEnlaceGeneradoAgendamiento(from, messageId, sesion, buttonId);
     return;
   }
 
@@ -5117,6 +5116,81 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
   }
 }
 
+function pagoTarjetaEnlaceVencidoAgendamiento(sesion) {
+  const paymentExpiresAtMs = sesion.paymentExpiresAt ? Date.parse(sesion.paymentExpiresAt) : null;
+  return Number.isFinite(paymentExpiresAtMs) && paymentExpiresAtMs <= Date.now();
+}
+
+async function manejarPagoTarjetaEnlaceGeneradoAgendamiento(from, messageId, sesion, buttonId = "") {
+  if (pagoTarjetaEnlaceVencidoAgendamiento(sesion)) {
+    eliminarSesionAgendamiento(from);
+    await enviarMensajeTexto(
+      from,
+      "El enlace de pago anterior expiró. Por favor vuelve al menú principal e inicia nuevamente el agendamiento."
+    );
+    await enviarMenu(from, "principal");
+    return;
+  }
+
+  if (!sesion.paymentUrl) {
+    const sesionMetodoPago = guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentTermsAccepted: false,
+      timestamp: Date.now()
+    });
+    await enviarSeleccionMetodoPagoAgendamiento(from, sesionMetodoPago);
+    return;
+  }
+
+  if (buttonId === BOTON_PAGO_TARJETA_NUEVO) {
+    const sesionNuevoPago = {
+      ...sesion,
+      paymentUrl: null,
+      clientTransactionId: null,
+      paymentHoldId: null,
+      paymentExpiresAt: null,
+      timestamp: Date.now()
+    };
+    guardarSesionAgendamiento(from, sesionNuevoPago);
+    await manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesionNuevoPago);
+    return;
+  }
+
+  if (buttonId === BOTON_PAGO_TARJETA_CAMBIAR) {
+    const sesionMetodoPago = guardarSesionAgendamiento(from, {
+      ...sesion,
+      paso: "seleccionando_metodo_pago",
+      paymentMethod: null,
+      paymentAmount: null,
+      paymentTermsAccepted: false,
+      paymentUrl: null,
+      clientTransactionId: null,
+      paymentHoldId: null,
+      paymentExpiresAt: null,
+      timestamp: Date.now()
+    });
+    await enviarSeleccionMetodoPagoAgendamiento(from, sesionMetodoPago);
+    return;
+  }
+
+  await enviarOpcionesPagoTarjetaGeneradoAgendamiento(from, sesion.paymentUrl);
+}
+
+async function enviarOpcionesPagoTarjetaGeneradoAgendamiento(to, paymentUrl) {
+  await enviarBotones(
+    to,
+    construirMensajePagoTarjetaGeneradoAgendamiento(paymentUrl),
+    [
+      boton(BOTON_PAGO_TARJETA_NUEVO, "Generar nuevo enlace"),
+      boton(BOTON_PAGO_TARJETA_CAMBIAR, "Cambiar método pago"),
+      botonMenuPrincipal()
+    ]
+  );
+}
+
 async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
   const erroresSesion = validarSesionTarjetaListaParaPagoAgendamiento(sesion);
 
@@ -5163,10 +5237,7 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
       paso: "pago_tarjeta_enlace_generado",
       timestamp: Date.now()
     });
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      construirMensajePagoTarjetaGeneradoAgendamiento(sesion.paymentUrl)
-    );
+    await enviarOpcionesPagoTarjetaGeneradoAgendamiento(from, sesion.paymentUrl);
     return;
   }
 
@@ -5230,10 +5301,7 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
         }
       });
 
-      await enviarMensajeAgendamientoConNavegacion(
-        from,
-        construirMensajePagoTarjetaGeneradoAgendamiento(paymentUrl)
-      );
+      await enviarOpcionesPagoTarjetaGeneradoAgendamiento(from, paymentUrl);
       return;
     }
 
@@ -7607,6 +7675,11 @@ function actualizarSesionUsuario(from, opciones = {}) {
 
   const sesionAgendamiento = sesionesAgendamiento.get(from);
   if (sesionAgendamiento) {
+    if (sesionExpirada(sesionAgendamiento)) {
+      eliminarSesionAgendamiento(from, sessionId);
+      return;
+    }
+
     guardarSesionAgendamiento(from, {
       ...sesionAgendamiento,
       timestamp: Date.now()
@@ -9197,7 +9270,9 @@ Para completar tu agendamiento, realiza el pago seguro en el siguiente enlace:
 
 ${paymentUrl}
 
-Una vez aprobado el pago, tu cita se registrará automáticamente.`;
+Una vez aprobado el pago, tu cita se registrará automáticamente.
+
+Si tuviste algún problema con el enlace, puedes generar uno nuevo o cambiar el método de pago.`;
 }
 
 function construirMensajeTerminosTransferenciaAgendamiento() {
@@ -9477,6 +9552,13 @@ function esBotonTerminosTransferenciaAgendamiento(buttonId) {
   return [
     BOTON_TRANSFERENCIA_TERMINOS_ACEPTO,
     BOTON_TRANSFERENCIA_TERMINOS_NO_ACEPTO
+  ].includes(buttonId);
+}
+
+function esBotonPagoTarjetaAgendamiento(buttonId) {
+  return [
+    BOTON_PAGO_TARJETA_NUEVO,
+    BOTON_PAGO_TARJETA_CAMBIAR
   ].includes(buttonId);
 }
 
