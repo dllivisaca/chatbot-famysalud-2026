@@ -1742,6 +1742,10 @@ function construirMensajeReintentoSolicitudAsesor(origen = "paciente") {
 
 async function manejarFalloNotificacionAsesor({ sesionAsesor, paciente, origen, messageId, buttonId, error }) {
   const asesoresIntentados = new Set([sesionAsesor.asesorId]);
+  let ultimoAsesorNotificado = {
+    id: sesionAsesor.asesorId,
+    phone: sesionAsesor.asesor
+  };
 
   console.error("[ASESOR] Fallo notificando asesor asignado. Sesion liberada:", {
     asesorId: sesionAsesor.asesorId,
@@ -1788,13 +1792,17 @@ async function manejarFalloNotificacionAsesor({ sesionAsesor, paciente, origen, 
       origen,
       error: resultado.error
     });
+    ultimoAsesorNotificado = {
+      id: nuevaSesion.asesorId,
+      phone: nuevaSesion.asesor
+    };
     asesoresIntentados.add(nuevaSesion.asesorId);
     finalizarSesionAsesorPersistidaSeguro(nuevaSesion.asesorId, "notificacion_fallida");
     resetearSesionAsesor(nuevaSesion.asesorId);
     asesorAlterno = obtenerAsesorLibreSinIntentar(asesoresIntentados);
   }
 
-  if (agregarPacienteAColaAsesor(paciente, origen)) {
+  if (agregarPacienteAColaAsesor(paciente, origen, { ultimoAsesorNotificado })) {
     console.log("[COLA_ASESOR] Paciente agregado a cola por fallo notificando asesores:", {
       paciente,
       origen,
@@ -2158,13 +2166,13 @@ function quitarPacienteDeColaAsesor(paciente) {
   const index = colaEsperaAsesor.findIndex((item) => item.paciente === paciente);
 
   if (index === -1) {
-    return false;
+    return null;
   }
 
-  colaEsperaAsesor.splice(index, 1);
+  const [item] = colaEsperaAsesor.splice(index, 1);
   ultimosAvisosColaAsesor.delete(paciente);
   eliminarColaAsesorSeguro(paciente);
-  return true;
+  return item;
 }
 
 async function manejarColaAsesorSeguirEsperando(paciente) {
@@ -2180,20 +2188,35 @@ async function manejarColaAsesorSeguirEsperando(paciente) {
 }
 
 async function manejarColaAsesorMenuPrincipal(paciente) {
-  const removido = quitarPacienteDeColaAsesor(paciente);
+  const sesionAsesor = obtenerSesionAsesorPorPaciente(paciente);
+  const itemRemovido = quitarPacienteDeColaAsesor(paciente);
+  const asesorNotificar = sesionAsesor?.asesor || itemRemovido?.ultimoAsesorNotificado?.phone || null;
 
-  if (!removido && obtenerSesionAsesorPorPaciente(paciente)) {
-    return;
+  if (!itemRemovido) {
+    ultimosAvisosColaAsesor.delete(paciente);
+    eliminarColaAsesorSeguro(paciente);
+  }
+
+  if (sesionAsesor) {
+    finalizarSesionAsesorPersistidaSeguro(sesionAsesor.asesorId, "paciente_salio_cola");
+    resetearSesionAsesor(sesionAsesor.asesorId);
   }
 
   console.log("[COLA_ASESOR] Paciente sale de cola y vuelve al menu", {
     paciente,
-    removido,
+    removido: Boolean(itemRemovido),
     totalEnCola: colaEsperaAsesor.length
   });
 
   actualizarSesionUsuario(paciente);
   await enviarMenu(paciente, "principal");
+
+  if (asesorNotificar) {
+    await enviarMensajeTexto(
+      asesorNotificar,
+      "ℹ️ El usuario salió de la espera y volvió al menú principal. Esta solicitud ya no está disponible."
+    );
+  }
 }
 
 function estaEnFlujoAsesor(phone) {
@@ -2222,7 +2245,7 @@ async function manejarMensajeUsuarioEnEsperaAsesor(from) {
   return false;
 }
 
-function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
+function agregarPacienteAColaAsesor(paciente, origen = "paciente", datos = {}) {
   if (pacienteEstaEnColaAsesor(paciente)) {
     return false;
   }
@@ -2231,14 +2254,15 @@ function agregarPacienteAColaAsesor(paciente, origen = "paciente") {
   colaEsperaAsesor.push({
     paciente,
     origen,
-    creadoEn: Date.now()
+    creadoEn: Date.now(),
+    ultimoAsesorNotificado: datos.ultimoAsesorNotificado || null
   });
   persistirColaAsesorSeguro(colaEsperaAsesor[colaEsperaAsesor.length - 1]);
 
   return true;
 }
 
-function agregarPacienteAlInicioColaAsesor(paciente, origen = "paciente") {
+function agregarPacienteAlInicioColaAsesor(paciente, origen = "paciente", datos = {}) {
   if (pacienteEstaEnColaAsesor(paciente)) {
     return false;
   }
@@ -2247,7 +2271,8 @@ function agregarPacienteAlInicioColaAsesor(paciente, origen = "paciente") {
   const item = {
     paciente,
     origen,
-    creadoEn: Date.now()
+    creadoEn: Date.now(),
+    ultimoAsesorNotificado: datos.ultimoAsesorNotificado || null
   };
   colaEsperaAsesor.unshift(item);
   persistirColaAsesorSeguro(item);
@@ -2383,7 +2408,12 @@ async function expirarAceptacionAsesorPorInactividad(asesorId) {
     return;
   }
 
-  if (agregarPacienteAlInicioColaAsesor(paciente, origen)) {
+  if (agregarPacienteAlInicioColaAsesor(paciente, origen, {
+    ultimoAsesorNotificado: {
+      id: asesorId,
+      phone: asesor
+    }
+  })) {
     console.log("[ASESOR_TIMEOUT] Paciente devuelto a cola por falta de asesor alterno:", {
       paciente,
       origen,
