@@ -4976,6 +4976,7 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
           status: response.status,
           bookingId,
           success: response.data?.success ?? response.data?.data?.success ?? null,
+          idempotent: response.data?.idempotent ?? response.data?.data?.idempotent ?? false,
           isOutsideBusinessHours: response.data?.is_outside_business_hours ?? response.data?.data?.is_outside_business_hours ?? false,
           appointment: response.data?.appointment || response.data?.data?.appointment || null
         },
@@ -9414,11 +9415,29 @@ Recibirá un segundo correo cuando su cita haya sido confirmada.`;
 }
 
 async function enviarMensajeFinalCitaTransferenciaRegistradaSeguro(to, sesion) {
-  const mensaje = construirMensajeCitaTransferenciaRegistradaAgendamiento(sesion);
-  const partes = dividirMensajePorLineas(mensaje);
+  const sesionActual = obtenerSesionAgendamiento(to) || sesion;
+  const confirmacionYaEnviada = Boolean(sesionActual?.transferenciaConfirmacionWhatsappEnviada);
 
-  for (const parte of partes) {
-    await enviarMensajeTexto(to, parte);
+  if (!confirmacionYaEnviada) {
+    const mensaje = construirMensajeCitaTransferenciaRegistradaAgendamiento(sesionActual);
+    const partes = dividirMensajePorLineas(mensaje);
+
+    for (const parte of partes) {
+      await enviarMensajeTexto(to, parte);
+    }
+
+    guardarSesionAgendamiento(to, {
+      ...sesionActual,
+      transferenciaConfirmacionWhatsappEnviada: true,
+      transferenciaConfirmacionWhatsappEnviadaEn: Date.now(),
+      timestamp: Date.now()
+    });
+  } else {
+    console.log("[AGENDAMIENTO_TRANSFERENCIA] Confirmacion WhatsApp ya enviada. No se reenvia resumen:", {
+      to,
+      bookingId: sesionActual?.bookingId || null,
+      idempotent: Boolean(sesionActual?.bookingResponse?.idempotent)
+    });
   }
 
   await enviarBotones(
