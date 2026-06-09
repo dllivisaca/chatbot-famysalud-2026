@@ -9896,6 +9896,7 @@ function construirCamposComunesPagoAgendamiento(sesion) {
 function construirCamposRegistroTransferenciaAgendamiento(sesion) {
   return {
     ...construirCamposComunesPagoAgendamiento(sesion),
+    appointment_hold_id: sesion.appointmentHoldId || sesion.paymentHoldId || null,
     amount: sesion.paymentAmount,
     amount_standard: sesion.paymentAmountStandard,
     discount_amount: sesion.paymentDiscountAmount,
