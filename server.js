@@ -162,6 +162,7 @@ const temporizadoresSesionAsesor = new Map();
 const temporizadoresAceptacionAsesor = new Map();
 const persistenciasAsesorPendientes = new Map();
 const persistenciasAgendamientoPendientes = new Map();
+const registrosTransferenciaEnCurso = new Map();
 const NUMEROS_INTERNOS = [
   ...ASESORES_WHATSAPP.map((asesor) => asesor.phone)
 ];
@@ -3199,10 +3200,7 @@ async function manejarFlujoAgendamiento(from, text, messageId, message = null, b
   }
 
   if (sesion.paso === "transferencia_completa_pendiente_registro") {
-    await enviarMensajeAgendamientoConNavegacion(
-      from,
-      construirMensajeTransferenciaPendienteRegistroAgendamiento()
-    );
+    await reintentarRegistroTransferenciaPendienteAgendamiento(from, sesion, messageId, "mensaje_usuario");
     return;
   }
 
@@ -4799,7 +4797,7 @@ ${construirMensajeComprobanteTransferenciaAgendamiento()}`
     }
   });
 
-  await registrarCitaTransferenciaAgendamiento(from, siguienteSesion, messageId);
+  await reintentarRegistroTransferenciaPendienteAgendamiento(from, siguienteSesion, messageId, "comprobante_recibido");
 }
 
 async function manejarTerminosPagoAgendamiento(from, text, messageId, sesion, buttonId = "") {
@@ -5115,6 +5113,43 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
       from,
       "Tenemos un problema temporal registrando la cita. Por favor intenta nuevamente o contacta a un asesor."
     );
+  }
+}
+
+async function reintentarRegistroTransferenciaPendienteAgendamiento(from, sesion, messageId = null, origen = "manual") {
+  const erroresSesion = validarSesionTransferenciaPendienteRegistroAgendamiento(sesion);
+
+  if (erroresSesion.length) {
+    console.warn("[AGENDAMIENTO_TRANSFERENCIA] No se puede reintentar registro pendiente por datos incompletos:", {
+      from,
+      origen,
+      missing: erroresSesion
+    });
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      "No pudimos completar autom\u00e1ticamente el registro de tu cita porque falta informaci\u00f3n obligatoria del turno o del comprobante. Por favor inicia nuevamente el agendamiento o contacta a un asesor de FamySALUD."
+    );
+    return;
+  }
+
+  if (registrosTransferenciaEnCurso.has(from)) {
+    console.log("[AGENDAMIENTO_TRANSFERENCIA] Registro ya en curso. Reintento omitido:", { from, origen });
+    await enviarMensajeAgendamientoConNavegacion(
+      from,
+      construirMensajeTransferenciaPendienteRegistroAgendamiento()
+    );
+    return;
+  }
+
+  registrosTransferenciaEnCurso.set(from, {
+    startedAt: Date.now(),
+    origen
+  });
+
+  try {
+    await registrarCitaTransferenciaAgendamiento(from, sesion, messageId);
+  } finally {
+    registrosTransferenciaEnCurso.delete(from);
   }
 }
 
@@ -9646,6 +9681,16 @@ function validarSesionTransferenciaListaParaRegistroAgendamiento(sesion) {
   return missing;
 }
 
+function validarSesionTransferenciaPendienteRegistroAgendamiento(sesion) {
+  const missing = validarSesionTransferenciaListaParaRegistroAgendamiento(sesion);
+
+  if (!sesion?.appointmentHoldId && !sesion?.paymentHoldId) {
+    missing.push("appointmentHoldIdOrPaymentHoldId");
+  }
+
+  return missing;
+}
+
 function validarSesionTarjetaListaParaPagoAgendamiento(sesion) {
   const required = {
     professionalId: sesion?.professionalId || sesion?.employeeId,
@@ -11458,6 +11503,23 @@ async function restaurarSesionesAgendamientoDesdeBD() {
 
       const tiempoRestante = Math.max(1, SESION_USUARIO_TTL_MS - (Date.now() - restaurada.sesion.timestamp));
       programarExpiracionSesion(restaurada.phone, tiempoRestante);
+
+      if (restaurada.sesion.paso === "transferencia_completa_pendiente_registro") {
+        setTimeout(() => {
+          reintentarRegistroTransferenciaPendienteAgendamiento(
+            restaurada.phone,
+            restaurada.sesion,
+            null,
+            "restauracion_bd"
+          ).catch((error) => {
+            console.warn("[AGENDAMIENTO_TRANSFERENCIA] Error reintentando registro restaurado:", construirDetalleErrorLog(error, {
+              action: "transfer_booking_restore_retry",
+              phone: restaurada.phone
+            }));
+          });
+        }, 0);
+      }
+
       restauradas += 1;
     }
 
