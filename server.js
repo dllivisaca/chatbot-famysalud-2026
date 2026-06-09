@@ -2293,7 +2293,7 @@ function esSesionEsperandoAceptacionAsesor(sesionAsesor) {
   );
 }
 
-function reiniciarTemporizadorAceptacionAsesor(asesorId) {
+function reiniciarTemporizadorAceptacionAsesor(asesorId, delayMs = TIEMPO_ACEPTACION_ASESOR_MS) {
   const temporizadorActual = temporizadoresAceptacionAsesor.get(asesorId);
   const sesionAsesor = obtenerSesionAsesor(asesorId);
 
@@ -2308,18 +2308,18 @@ function reiniciarTemporizadorAceptacionAsesor(asesorId) {
 
   const temporizador = setTimeout(async () => {
     await expirarAceptacionAsesorPorInactividad(asesorId);
-  }, TIEMPO_ACEPTACION_ASESOR_MS);
+  }, delayMs);
   temporizadoresAceptacionAsesor.set(asesorId, temporizador);
 
   console.log("[ASESOR_TIMEOUT] Temporizador de aceptacion reiniciado:", {
     asesorId,
     paciente: sesionAsesor.paciente,
     estado: sesionAsesor.estado,
-    tiempoMs: TIEMPO_ACEPTACION_ASESOR_MS
+    tiempoMs: delayMs
   });
 }
 
-function reiniciarTemporizadorSesionAsesor(asesorId) {
+function reiniciarTemporizadorSesionAsesor(asesorId, delayMs = TIEMPO_EXPIRACION_ASESOR_MS) {
   const temporizadorActual = temporizadoresSesionAsesor.get(asesorId);
   const sesionAsesor = obtenerSesionAsesor(asesorId);
 
@@ -2334,13 +2334,13 @@ function reiniciarTemporizadorSesionAsesor(asesorId) {
 
   const temporizador = setTimeout(async () => {
     await expirarSesionAsesorPorInactividad(asesorId);
-  }, TIEMPO_EXPIRACION_ASESOR_MS);
+  }, delayMs);
   temporizadoresSesionAsesor.set(asesorId, temporizador);
 
   console.log("[SESION] Temporizador de asesor reiniciado:", {
     asesorId,
     paciente: sesionAsesor.paciente,
-    tiempoMs: TIEMPO_EXPIRACION_ASESOR_MS
+    tiempoMs: delayMs
   });
 }
 
@@ -11281,6 +11281,7 @@ function construirSesionAsesorDesdePersistencia(row) {
   }
 
   const asignadoEn = fechaPersistidaAMs(row.asignado_en || row.creado_en);
+  const restauradoDesde = obtenerTimestampRestauracionAsesor(row);
 
   return {
     asesorId: asesor.id,
@@ -11293,7 +11294,8 @@ function construirSesionAsesorDesdePersistencia(row) {
     estado: row.estado,
     asignadoEn,
     conectadoEn: row.conectado_en ? fechaPersistidaAMs(row.conectado_en) : null,
-    waitMs: 0
+    waitMs: 0,
+    restauradoDesde
   };
 }
 
@@ -11391,9 +11393,23 @@ async function restaurarEstadoAsesoresDesdeBD() {
 
     for (const sesion of sesionesAsesores.values()) {
       if (sesion.estado === "conectado") {
-        reiniciarTemporizadorSesionAsesor(sesion.asesorId);
+        const edadSesion = Math.max(now - (sesion.restauradoDesde || now), 0);
+        const tiempoRestante = TIEMPO_EXPIRACION_ASESOR_MS - edadSesion;
+
+        if (tiempoRestante <= 0) {
+          await expirarSesionAsesorPorInactividad(sesion.asesorId);
+        } else {
+          reiniciarTemporizadorSesionAsesor(sesion.asesorId, tiempoRestante);
+        }
       } else if (esSesionEsperandoAceptacionAsesor(sesion)) {
-        reiniciarTemporizadorAceptacionAsesor(sesion.asesorId);
+        const edadSesion = Math.max(now - (sesion.restauradoDesde || now), 0);
+        const tiempoRestante = TIEMPO_ACEPTACION_ASESOR_MS - edadSesion;
+
+        if (tiempoRestante <= 0) {
+          await expirarAceptacionAsesorPorInactividad(sesion.asesorId);
+        } else {
+          reiniciarTemporizadorAceptacionAsesor(sesion.asesorId, tiempoRestante);
+        }
       }
     }
 
