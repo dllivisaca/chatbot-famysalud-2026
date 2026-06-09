@@ -11411,10 +11411,11 @@ async function restaurarEstadoAsesoresDesdeBD() {
       sesionesActivas: Array.from(sesionesAsesores.values()).filter((sesion) => sesion.estado !== "libre").length
     });
   } catch (error) {
-    console.warn("[ASESOR_DB] No se pudo restaurar estado. Iniciando solo en memoria:", construirDetalleErrorLog(error, {
+    console.error("[ASESOR_DB] No se pudo restaurar estado. Arranque bloqueado para evitar duplicar asignaciones o cortar chats activos:", construirDetalleErrorLog(error, {
       action: "restore_active",
       elapsedMs: Date.now() - startedAt
     }));
+    throw error;
   }
 }
 
@@ -11449,10 +11450,11 @@ async function restaurarSesionesAgendamientoDesdeBD() {
       elapsedMs: Date.now() - startedAt
     });
   } catch (error) {
-    console.warn("[AGENDAMIENTO_DB] No se pudo restaurar sesiones. Iniciando solo en memoria:", construirDetalleErrorLog(error, {
+    console.error("[AGENDAMIENTO_DB] No se pudo restaurar sesiones. Arranque bloqueado para evitar perder agendamientos activos o dejar holds inconsistentes:", construirDetalleErrorLog(error, {
       action: "appointment_session_restore_active",
       elapsedMs: Date.now() - startedAt
     }));
+    throw error;
   }
 }
 
@@ -11517,7 +11519,7 @@ function programarRevisionFeriados() {
 Promise.all([
   restaurarEstadoAsesoresDesdeBD(),
   restaurarSesionesAgendamientoDesdeBD()
-]).finally(() => {
+]).then(() => {
   app.listen(PORT, () => {
     console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`);
     console.log(`[CONFIG] Entorno: ${APP_ENV}`);
@@ -11527,4 +11529,9 @@ Promise.all([
     programarLimpiezaSesionesAgendamientoExpiradas();
     programarRevisionFeriados();
   });
+}).catch((error) => {
+  console.error("[SERVIDOR] Arranque bloqueado: fallo la restauracion de sesiones criticas desde BD. El servidor no escuchara en puerto para evitar estado solo en memoria.", construirDetalleErrorLog(error, {
+    action: "startup_restore_critical_sessions"
+  }));
+  process.exitCode = 1;
 });
