@@ -79,6 +79,7 @@ const CATALOG_CACHE_TTL_MS = (Number.isInteger(CATALOG_CACHE_TTL_MINUTES) && CAT
 const CATALOG_CACHE_DIR = path.join(__dirname, "data");
 const CATALOG_CACHE_FILE = path.join(CATALOG_CACHE_DIR, "catalogo-servicios.json");
 const MENSAJES_PROCESADOS_TTL_MS = 24 * 60 * 60 * 1000;
+const PAYPHONE_CONFIRMACIONES_PROCESADAS_TTL_MS = 24 * 60 * 60 * 1000;
 const INTERVALO_LIMPIEZA_AGENDAMIENTO_MS = 60 * 1000;
 const AGENDAMIENTO_WHATSAPP_HOLD_TTL_MS = 30 * 60 * 1000;
 const TRANSFER_RECEIPT_MAX_BYTES = 5 * 1024 * 1024;
@@ -130,6 +131,7 @@ const sesionesResultadosEmpresas = new Map();
 const sesionesProveedor = new Map();
 const sesionesAlianza = new Map();
 const mensajesProcesados = new Map();
+const confirmacionesPayphoneProcesadas = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
 const ASESOR_WHATSAPP_PRINCIPAL = process.env.ASESOR_WHATSAPP_PRINCIPAL || "593939034743";
@@ -331,6 +333,39 @@ function mensajeYaProcesado(messageId) {
 function marcarMensajeProcesado(messageId, now = Date.now()) {
   if (messageId) {
     mensajesProcesados.set(messageId, now);
+  }
+}
+
+function construirClaveConfirmacionPayphone(payload = {}) {
+  const bookingId = String(payload.booking_id || payload.bookingId || "").trim();
+  const clientTransactionId = String(payload.client_transaction_id || payload.clientTransactionId || "").trim();
+
+  if (bookingId) {
+    return `booking:${bookingId}`;
+  }
+
+  if (clientTransactionId) {
+    return `transaction:${clientTransactionId}`;
+  }
+
+  return null;
+}
+
+function purgarConfirmacionesPayphoneProcesadas(now = Date.now()) {
+  for (const [key, timestamp] of confirmacionesPayphoneProcesadas.entries()) {
+    if (now - timestamp > PAYPHONE_CONFIRMACIONES_PROCESADAS_TTL_MS) {
+      confirmacionesPayphoneProcesadas.delete(key);
+    }
+  }
+}
+
+function confirmacionPayphoneYaProcesada(key) {
+  return Boolean(key && confirmacionesPayphoneProcesadas.has(key));
+}
+
+function marcarConfirmacionPayphoneProcesada(key, now = Date.now()) {
+  if (key) {
+    confirmacionesPayphoneProcesadas.set(key, now);
   }
 }
 
@@ -638,6 +673,8 @@ app.post("/internal/payphone/approved", async (req, res) => {
 
   const whatsappConversationId = String(payload.whatsapp_conversation_id || "").trim();
   const bookingId = String(payload.booking_id || "").trim();
+  const claveConfirmacion = construirClaveConfirmacionPayphone(payload);
+  const now = Date.now();
 
   if (!whatsappConversationId || !bookingId) {
     console.warn("[PAYPHONE_WEBHOOK] Payload incompleto:", {
@@ -645,6 +682,16 @@ app.post("/internal/payphone/approved", async (req, res) => {
       hasBookingId: Boolean(bookingId)
     });
     return res.status(400).json({ ok: false, error: "missing_required_fields" });
+  }
+
+  purgarConfirmacionesPayphoneProcesadas(now);
+
+  if (confirmacionPayphoneYaProcesada(claveConfirmacion)) {
+    console.log("[PAYPHONE_WEBHOOK] Confirmacion duplicada omitida:", {
+      bookingId,
+      userHash: hashUsuario(whatsappConversationId)
+    });
+    return res.json({ ok: true, duplicate: true });
   }
 
   const resultado = await enviarConfirmacionPagoPayphoneAprobado(whatsappConversationId, payload);
@@ -658,6 +705,7 @@ app.post("/internal/payphone/approved", async (req, res) => {
     return res.status(502).json({ ok: false, error: "whatsapp_send_failed" });
   }
 
+  marcarConfirmacionPayphoneProcesada(claveConfirmacion, now);
   eliminarSesionAgendamiento(whatsappConversationId);
 
   console.log("[PAYPHONE_WEBHOOK] Confirmacion enviada:", {
