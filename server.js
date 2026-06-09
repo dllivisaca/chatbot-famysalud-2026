@@ -1763,19 +1763,11 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de servicios para empresas. Por favor espera un momento 😊"
       : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
   );
-  const notificacionAsesor = await enviarMensajeTextoConResultado(
-    sesionAsesor.asesor,
-    esAlianzaExistente
-      ? "📩 Nueva solicitud de atención - ALIADO ESTRATÉGICO EXISTENTE\n\nUn aliado estratégico existente está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : esAlianzaPotencial
-      ? "📩 Nueva solicitud de atención - ALIANZA POTENCIAL\n\nUna persona interesada en una alianza estratégica está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : esProveedorExistente
-      ? "📩 Nueva solicitud de atención - PROVEEDOR EXISTENTE\n\nUn proveedor existente está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : esProveedor
-      ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : esEmpresa
-      ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+  const mensajeInicialAsesor = construirMensajeInicialAsesorDesdeSesion(sesionAsesor);
+  const notificacionAsesor = await notificarAsignacionAsesorConFallbackPlantilla(
+    sesionAsesor.asesorId,
+    sesionAsesor,
+    mensajeInicialAsesor
   );
 
   if (!notificacionAsesor.ok) {
@@ -1793,6 +1785,96 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
 
 function construirMensajeReintentoSolicitudAsesor(origen = "paciente") {
   return `Nueva solicitud de atencion.\n\n${obtenerEtiquetaOrigenAsesor(origen)} esta esperando atencion.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+}
+
+function construirMensajeInicialAsesorDesdeSesion(sesionAsesor) {
+  const origen = sesionAsesor?.origen || "paciente";
+  const desdeCola = Number.isFinite(Number(sesionAsesor?.waitMs)) && Number(sesionAsesor.waitMs) > 0;
+  const estadoSolicitud = desdeCola ? "está listo para ser atendido" : "está esperando atención";
+  const estadoSolicitudFemenino = desdeCola ? "está lista para ser atendida" : "está esperando atención";
+
+  if (origen === "alianza_existente") {
+    return `📩 Nueva solicitud de atención - ALIADO ESTRATÉGICO EXISTENTE\n\nUn aliado estratégico existente ${estadoSolicitud}.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+  }
+
+  if (origen === "alianza_potencial") {
+    return `📩 Nueva solicitud de atención - ALIANZA POTENCIAL\n\nUna persona interesada en una alianza estratégica ${estadoSolicitudFemenino}.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+  }
+
+  if (origen === "proveedor_existente") {
+    return `📩 Nueva solicitud de atención - PROVEEDOR EXISTENTE\n\nUn proveedor existente ${estadoSolicitud}.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+  }
+
+  if (origen === "proveedor") {
+    return `📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor ${estadoSolicitud}.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+  }
+
+  if (origen === "empresa") {
+    return `📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución ${estadoSolicitudFemenino}.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer`;
+  }
+
+  return desdeCola
+    ? "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+    : "📩 Nuevo paciente esperando atención.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer";
+}
+
+function obtenerTelefonoSesionAsesor(sesionAsesor) {
+  if (typeof sesionAsesor?.asesor === "string") {
+    return sesionAsesor.asesor;
+  }
+
+  return sesionAsesor?.asesor?.phone || sesionAsesor?.asesor?.telefono || null;
+}
+
+function marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor) {
+  sesionAsesor.notificacionInicialAsesorPendiente = true;
+  sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = Date.now();
+  guardarSesionAsesor(asesorId, sesionAsesor);
+}
+
+async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAsesor, mensajeInicialAsesor) {
+  const asesorPhone = obtenerTelefonoSesionAsesor(sesionAsesor);
+
+  if (!asesorPhone) {
+    console.error("[ASESOR] No se pudo notificar asignación porque no hay teléfono de asesor.", {
+      asesorId,
+      sesionAsesor
+    });
+
+    return {
+      ok: false,
+      error: new Error("No se pudo obtener el teléfono del asesor")
+    };
+  }
+
+  const resultadoTexto = await enviarMensajeTextoConResultado(asesorPhone, mensajeInicialAsesor);
+
+  if (resultadoTexto?.ok) {
+    sesionAsesor.notificacionInicialAsesorPendiente = false;
+    sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = null;
+    guardarSesionAsesor(asesorId, sesionAsesor);
+    return resultadoTexto;
+  }
+
+  console.warn("[ASESOR] Texto libre rechazado o falló. Enviando plantilla de nueva asignación.", {
+    asesorId,
+    asesorPhone,
+    error: resultadoTexto?.error?.response?.data || resultadoTexto?.error?.message || resultadoTexto?.error
+  });
+
+  marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor);
+
+  const resultadoPlantilla = await enviarPlantillaNuevoPacienteAsesorConResultado(asesorPhone);
+
+  if (!resultadoPlantilla?.ok) {
+    console.error("[ASESOR] También falló envío de plantilla nuevo_paciente_asesor.", {
+      asesorId,
+      asesorPhone,
+      error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
+    });
+  }
+
+  return resultadoPlantilla;
 }
 
 async function manejarFalloNotificacionAsesor({ sesionAsesor, paciente, origen, messageId, buttonId, error }) {
@@ -1890,6 +1972,25 @@ async function manejarMensajeAsesor(from, rawText, message) {
   }
 
   const mensaje = (rawText || "").trim();
+
+  if (sesionAsesor.notificacionInicialAsesorPendiente === true) {
+    const mensajeInicialAsesor = construirMensajeInicialAsesorDesdeSesion(sesionAsesor);
+    const resultadoPendiente = await enviarMensajeTextoConResultado(from, mensajeInicialAsesor);
+
+    if (resultadoPendiente?.ok) {
+      sesionAsesor.notificacionInicialAsesorPendiente = false;
+      sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = null;
+      guardarSesionAsesor(sesionAsesor.asesorId, sesionAsesor);
+      return true;
+    }
+
+    console.error("[ASESOR] No se pudo enviar notificacion inicial pendiente tras respuesta a plantilla.", {
+      asesorId: sesionAsesor.asesorId,
+      asesor: from,
+      error: resultadoPendiente?.error?.response?.data || resultadoPendiente?.error?.message || resultadoPendiente?.error
+    });
+    return true;
+  }
 
   if (sesionAsesor.estado === "esperando_nombre") {
     if (!mensaje) {
@@ -2599,19 +2700,10 @@ async function atenderSiguientePacienteEnCola(asesorId) {
     sesionAsesor.paciente,
     "💬 Ya es tu turno. En un momento uno de nuestros asesores de FamySALUD se conectará contigo 😊"
   );
-  await enviarMensajeTexto(
-    sesionAsesor.asesor,
-    sesionAsesor.origen === "alianza_existente"
-      ? "📩 Nueva solicitud de atención - ALIADO ESTRATÉGICO EXISTENTE\n\nUn aliado estratégico existente está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : sesionAsesor.origen === "alianza_potencial"
-      ? "📩 Nueva solicitud de atención - ALIANZA POTENCIAL\n\nUna persona interesada en una alianza estratégica está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : sesionAsesor.origen === "proveedor_existente"
-      ? "📩 Nueva solicitud de atención - PROVEEDOR EXISTENTE\n\nUn proveedor existente está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : sesionAsesor.origen === "proveedor"
-      ? "📩 Nueva solicitud de atención - POTENCIAL PROVEEDOR\n\nUn potencial proveedor está listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : sesionAsesor.origen === "empresa"
-      ? "📩 Nueva solicitud de atención - EMPRESA\n\nUna empresa o institución está lista para ser atendida.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
-      : "📩 Nuevo paciente en espera listo para ser atendido.\n\nResponde con tu nombre para conectarte.\nEjemplo: Jennifer"
+  await notificarAsignacionAsesorConFallbackPlantilla(
+    sesionAsesor.asesorId,
+    sesionAsesor,
+    construirMensajeInicialAsesorDesdeSesion(sesionAsesor)
   );
 }
 
@@ -11059,6 +11151,49 @@ async function enviarMensajeTextoConResultado(to, message) {
     });
     return { ok: false, error: detalle };
   }
+}
+
+async function enviarPlantillaWhatsAppConResultado(to, templateName, languageCode = "es_EC", components = []) {
+  try {
+    const payload = {
+      messaging_product: "whatsapp",
+      to,
+      type: "template",
+      template: {
+        name: templateName,
+        language: {
+          code: languageCode
+        }
+      }
+    };
+
+    if (Array.isArray(components) && components.length > 0) {
+      payload.template.components = components;
+    }
+
+    const response = await enviarWhatsApp(payload);
+    return { ok: true, response };
+  } catch (error) {
+    console.error("[WHATSAPP_TEMPLATE_ERROR]", {
+      to,
+      templateName,
+      languageCode,
+      error: error?.response?.data || error?.message || error
+    });
+
+    return {
+      ok: false,
+      error
+    };
+  }
+}
+
+async function enviarPlantillaNuevoPacienteAsesorConResultado(asesorPhone) {
+  return enviarPlantillaWhatsAppConResultado(
+    asesorPhone,
+    "nuevo_paciente_asesor",
+    "es_EC"
+  );
 }
 
 function esMensajeMultimedia(message) {
