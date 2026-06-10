@@ -64,6 +64,7 @@ const SMTP_SECURE = flagActiva(process.env.SMTP_SECURE);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
 const WHATSAPP_API_VERSION = "v20.0";
+const TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE = process.env.TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE || "es";
 const WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.WHATSAPP_REQUEST_TIMEOUT_MS || "15000", 10);
 const WHATSAPP_REQUEST_TIMEOUT_MS = Number.isInteger(WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG) && WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG > 0
   ? WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG
@@ -537,6 +538,8 @@ const ACCIONES_BOTONES = {
   main_alianzas: { type: "menu", menu: "alianzasEntrada" },
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text_with_main_menu", text: TEXTOS.trabaja },
+  cot_area_back: { type: "quote_area_back" },
+  cot_servicio_back: { type: "quote_service_back" },
   volver_cotizar: { type: "restart_quote" },
   agendamiento_volver: { type: "appointment_back" },
 
@@ -1847,7 +1850,13 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
     };
   }
 
-  const resultadoTexto = await enviarMensajeTextoConResultado(asesorPhone, mensajeInicialAsesor);
+  let resultadoTexto;
+
+  try {
+    resultadoTexto = await enviarMensajeTextoConResultado(asesorPhone, mensajeInicialAsesor);
+  } catch (error) {
+    resultadoTexto = { ok: false, error };
+  }
 
   if (resultadoTexto?.ok) {
     sesionAsesor.notificacionInicialAsesorPendiente = false;
@@ -1864,13 +1873,33 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
 
   marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor);
 
+  console.log("[ASESOR_TEMPLATE_FALLBACK] Intentando plantilla...", {
+    asesorId,
+    asesorPhone,
+    templateName: "nuevo_paciente_asesor",
+    languageCode: TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE
+  });
   const resultadoPlantilla = await enviarPlantillaNuevoPacienteAsesorConResultado(asesorPhone);
 
   if (!resultadoPlantilla?.ok) {
+    console.error("[ASESOR_TEMPLATE_FALLBACK] Error plantilla...", {
+      asesorId,
+      asesorPhone,
+      error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
+    });
     console.error("[ASESOR] También falló envío de plantilla nuevo_paciente_asesor.", {
       asesorId,
       asesorPhone,
       error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
+    });
+  }
+
+  if (resultadoPlantilla?.ok) {
+    console.log("[ASESOR_TEMPLATE_FALLBACK] Plantilla enviada...", {
+      asesorId,
+      asesorPhone,
+      templateName: "nuevo_paciente_asesor",
+      languageCode: TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE
     });
   }
 
@@ -1908,8 +1937,9 @@ async function manejarFalloNotificacionAsesor({ sesionAsesor, paciente, origen, 
       origen
     });
 
-    const resultado = await enviarMensajeTextoConResultado(
-      nuevaSesion.asesor,
+    const resultado = await notificarAsignacionAsesorConFallbackPlantilla(
+      nuevaSesion.asesorId,
+      nuevaSesion,
       construirMensajeReintentoSolicitudAsesor(origen)
     );
 
@@ -2332,14 +2362,17 @@ function quitarPacienteDeColaAsesor(paciente) {
 }
 
 async function manejarColaAsesorSeguirEsperando(paciente) {
-  if (!pacienteEstaEnColaAsesor(paciente) && obtenerSesionAsesorPorPaciente(paciente)) {
+  const estaEnCola = pacienteEstaEnColaAsesor(paciente);
+  const sesionAsesor = obtenerSesionAsesorPorPaciente(paciente);
+
+  if (!estaEnCola && !sesionAsesor) {
     return;
   }
 
   console.log("[COLA_ASESOR] Paciente decide seguir esperando", { paciente });
-  await enviarMensajeTexto(
+  await enviarOpcionesColaAsesor(
     paciente,
-    "Perfecto, te mantenemos en cola. Te avisaremos cuando un asesor est\u00e9 disponible \uD83D\uDC99"
+    "\u23f3 Seguimos buscando un asesor disponible para continuar contigo. Gracias por tu paciencia \ud83d\udc99"
   );
 }
 
@@ -2877,6 +2910,16 @@ async function manejarBoton(to, buttonId, messageId) {
 
   if (accion.type === "restart_quote") {
     await reiniciarCotizacion(to, messageId);
+    return;
+  }
+
+  if (accion.type === "quote_area_back") {
+    await volverDesdeAreasCotizacion(to, messageId);
+    return;
+  }
+
+  if (accion.type === "quote_service_back") {
+    await volverDesdeServiciosCotizacion(to, messageId);
     return;
   }
 
@@ -6048,12 +6091,21 @@ async function reiniciarCotizacion(from, messageId) {
     timestamp: Date.now()
   });
 
-  if (puedeUsarListaWhatsApp(sesion.areas)) {
-    await enviarListaAreasCotizacion(from, sesion.areas);
-    return;
-  }
+  await enviarAreasCotizacionConNavegacion(from, sesion.areas);
+}
 
-  await enviarMensajeTexto(from, construirMensajeAreasCotizacion(sesion.areas));
+async function volverDesdeAreasCotizacion(from, messageId) {
+  sesionesCotizacion.delete(from);
+  registrarEvento(from, "button_click", {
+    messageId,
+    buttonId: "cot_area_back",
+    flowKey: "cotizacion_area",
+    payload: {
+      action: "back",
+      to: "pacientes"
+    }
+  });
+  await enviarMenu(from, "pacientes");
 }
 
 async function iniciarSolicitudResultados(from, messageId) {
@@ -8071,6 +8123,10 @@ function botonMenuPrincipal() {
   return boton("main_menu", "🏠 Menú principal");
 }
 
+function botonVolverAreasCotizacion() {
+  return boton("cot_area_back", "Volver atras");
+}
+
 function botonVolverCotizar() {
   return boton("volver_cotizar", "Volver a cotizar");
 }
@@ -8324,7 +8380,8 @@ function construirMensajeAreasCotizacion(areas) {
 
 ${listadoAreas}
 
-Responde con el numero del area para ver sus servicios.`;
+Responde con el numero del area para ver sus servicios.
+Ejemplo: escribe 1 para seleccionar la primera opcion.`;
 }
 
 function obtenerIndiceDesdeTexto(text) {
@@ -10457,7 +10514,38 @@ function construirMensajeServiciosCotizacion(area, servicios) {
 
 ${listadoServicios}
 
-Responde con el numero del servicio que deseas consultar.`;
+Responde con el numero del servicio que deseas consultar.
+Ejemplo: escribe 1 para seleccionar el primer servicio de la lista.`;
+}
+
+async function enviarListadoCotizacionConNavegacion(to, message, botonVolver) {
+  const partes = dividirMensajePorLineas(message);
+
+  for (const parte of partes) {
+    await enviarMensajeTexto(to, parte);
+  }
+
+  await enviarBotones(
+    to,
+    "Puedes navegar con estas opciones:",
+    [botonVolver, botonMenuPrincipal()]
+  );
+}
+
+async function enviarAreasCotizacionConNavegacion(to, areas) {
+  await enviarListadoCotizacionConNavegacion(
+    to,
+    construirMensajeAreasCotizacion(areas),
+    botonVolverAreasCotizacion()
+  );
+}
+
+async function enviarServiciosCotizacionConNavegacion(to, area, servicios) {
+  await enviarListadoCotizacionConNavegacion(
+    to,
+    construirMensajeServiciosCotizacion(area, servicios),
+    boton(construirIdVolverServicioCotizacion(), "Volver atras")
+  );
 }
 
 async function enviarListaAreasCotizacion(to, areas) {
@@ -10673,12 +10761,7 @@ async function volverDesdeServiciosCotizacion(from, messageId) {
     timestamp: Date.now()
   });
 
-  if (puedeUsarListaWhatsApp(sesion.areas)) {
-    await enviarListaAreasCotizacion(from, sesion.areas);
-    return;
-  }
-
-  await enviarMensajeTexto(from, construirMensajeAreasCotizacion(sesion.areas));
+  await enviarAreasCotizacionConNavegacion(from, sesion.areas);
 }
 
 async function manejarSeleccionAreaCotizacion(from, text, messageId, origen = "text") {
@@ -10745,12 +10828,7 @@ async function manejarSeleccionAreaCotizacion(from, text, messageId, origen = "t
     timestamp: Date.now()
   });
 
-  if (puedeUsarListaWhatsApp(servicios)) {
-    await enviarListaServiciosCotizacion(from, areaSeleccionada, servicios);
-    return;
-  }
-
-  await enviarMensajeTexto(from, construirMensajeServiciosCotizacion(areaSeleccionada, servicios));
+  await enviarServiciosCotizacionConNavegacion(from, areaSeleccionada, servicios);
 }
 
 async function manejarSeleccionServicioCotizacion(from, text, messageId, origen = "text") {
@@ -10841,12 +10919,7 @@ async function enviarAreasCotizacion(to) {
       totalAreas: areas.length
     });
 
-    if (puedeUsarListaWhatsApp(areas)) {
-      await enviarListaAreasCotizacion(to, areas);
-      return;
-    }
-
-    await enviarMensajeTexto(to, construirMensajeAreasCotizacion(areas));
+    await enviarAreasCotizacionConNavegacion(to, areas);
   } catch (error) {
     console.error("[CATALOGO] Error al cargar catalogo:", {
       message: error.message,
@@ -11172,6 +11245,12 @@ async function enviarPlantillaWhatsAppConResultado(to, templateName, languageCod
     }
 
     const response = await enviarWhatsApp(payload);
+    console.log("[WHATSAPP_TEMPLATE] Plantilla enviada correctamente:", {
+      to,
+      templateName,
+      languageCode,
+      status: response?.status || null
+    });
     return { ok: true, response };
   } catch (error) {
     console.error("[WHATSAPP_TEMPLATE_ERROR]", {
@@ -11192,7 +11271,7 @@ async function enviarPlantillaNuevoPacienteAsesorConResultado(asesorPhone) {
   return enviarPlantillaWhatsAppConResultado(
     asesorPhone,
     "nuevo_paciente_asesor",
-    "es_EC"
+    TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE
   );
 }
 
