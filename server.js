@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Guayaquil";
 process.env.TZ = process.env.TZ || APP_TIMEZONE;
@@ -1673,6 +1673,14 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   });
 
   if (sesionExistente) {
+    console.warn("[ASESOR_DEBUG] No se notificó asesor", {
+      razon: "sesion_existente",
+      asesorId: sesionExistente.asesorId || null,
+      asesorPhone: obtenerTelefonoSesionAsesor(sesionExistente),
+      paciente,
+      estado: sesionExistente.estado || null,
+      origen: sesionExistente.origen || origen
+    });
     await enviarMensajeTexto(
       paciente,
       "💬 Ya estás esperando para hablar con un asesor.\n\nTe avisaremos cuando se conecte contigo 😊"
@@ -1682,6 +1690,11 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
 
   if (!(await estaEnHorarioLaboralAsesor())) {
     console.log("[ASESOR_HORARIO] Solicitud fuera de horario laboral:", {
+      paciente,
+      origen
+    });
+    console.warn("[ASESOR_DEBUG] No se notificó asesor", {
+      razon: "fuera_horario",
       paciente,
       origen
     });
@@ -1697,6 +1710,12 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
 
   if (!asesorLibre) {
     if (agregarPacienteAColaAsesor(paciente, origen)) {
+      console.warn("[ASESOR_DEBUG] No se notificó asesor", {
+        razon: "sin_asesor_libre_paciente_en_cola",
+        paciente,
+        origen,
+        totalEnCola: colaEsperaAsesor.length
+      });
       console.log("[COLA_ASESOR] Paciente agregado a cola:", {
         paciente,
         origen,
@@ -1729,6 +1748,12 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       origen,
       totalEnCola: colaEsperaAsesor.length
     });
+    console.warn("[ASESOR_DEBUG] No se notificó asesor", {
+      razon: "paciente_ya_en_cola",
+      paciente,
+      origen,
+      totalEnCola: colaEsperaAsesor.length
+    });
     await enviarMensajeTexto(
       paciente,
       "💬 Ya estás en la cola de espera para hablar con un asesor.\n\nTe avisaremos cuando sea tu turno 😊"
@@ -1742,10 +1767,23 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     asesorId: asesorLibre.id,
     colaPendiente: colaEsperaAsesor.length
   });
+  console.log("[ASESOR_DEBUG] Asesor seleccionado para asignación", {
+    asesorId: asesorLibre.id,
+    asesorPhone: asesorLibre.phone,
+    paciente,
+    origen
+  });
   const sesionAsesor = guardarSesionAsesor(asesorLibre.id, construirSesionAsesorAsignada(asesorLibre, paciente, origen));
   cancelarExpiracionSesion(paciente);
 
   console.log("[SESION] Asesor esperando nombre:", sesionAsesor);
+  console.log("[ASESOR_DEBUG] Sesión asesor guardada antes de notificar", {
+    asesorId: sesionAsesor.asesorId,
+    asesorPhone: obtenerTelefonoSesionAsesor(sesionAsesor),
+    paciente: sesionAsesor.paciente,
+    estado: sesionAsesor.estado,
+    origen: sesionAsesor.origen
+  });
   registrarEvento(paciente, "advisor_session_requested", {
     messageId,
     buttonId,
@@ -1767,6 +1805,12 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
   );
   const mensajeInicialAsesor = construirMensajeInicialAsesorDesdeSesion(sesionAsesor);
+  console.log("[ASESOR_DEBUG] Llamando notificación con fallback", {
+    asesorId: sesionAsesor.asesorId,
+    asesorPhone: obtenerTelefonoSesionAsesor(sesionAsesor),
+    paciente: sesionAsesor.paciente,
+    origen: sesionAsesor.origen
+  });
   const notificacionAsesor = await notificarAsignacionAsesorConFallbackPlantilla(
     sesionAsesor.asesorId,
     sesionAsesor,
@@ -1774,6 +1818,14 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   );
 
   if (!notificacionAsesor.ok) {
+    console.warn("[ASESOR_DEBUG] No se notificó asesor", {
+      razon: "notificacion_fallida",
+      asesorId: sesionAsesor.asesorId,
+      asesorPhone: obtenerTelefonoSesionAsesor(sesionAsesor),
+      paciente,
+      origen,
+      error: notificacionAsesor.error?.response?.data || notificacionAsesor.error?.message || notificacionAsesor.error
+    });
     await manejarFalloNotificacionAsesor({
       sesionAsesor,
       paciente,
@@ -1837,11 +1889,24 @@ function marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor) {
 
 async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAsesor, mensajeInicialAsesor) {
   const asesorPhone = obtenerTelefonoSesionAsesor(sesionAsesor);
+  console.log("[ASESOR_DEBUG] Entró a notificarAsignacionAsesorConFallbackPlantilla", {
+    asesorId,
+    asesorPhone,
+    paciente: sesionAsesor?.paciente || null,
+    origen: sesionAsesor?.origen || null
+  });
 
   if (!asesorPhone) {
     console.error("[ASESOR] No se pudo notificar asignación porque no hay teléfono de asesor.", {
       asesorId,
       sesionAsesor
+    });
+
+    console.warn("[ASESOR_DEBUG] No se notificó asesor", {
+      razon: "asesor_sin_telefono",
+      asesorId,
+      paciente: sesionAsesor?.paciente || null,
+      origen: sesionAsesor?.origen || null
     });
 
     return {
@@ -1853,12 +1918,22 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
   let resultadoTexto;
 
   try {
-    resultadoTexto = await enviarMensajeTextoConResultado(asesorPhone, mensajeInicialAsesor);
+    console.log("[ASESOR_DEBUG] Intentando texto libre asesor con maxAttempts=1", {
+      asesorPhone,
+      paciente: sesionAsesor?.paciente || null
+    });
+    resultadoTexto = await enviarMensajeTextoConResultado(asesorPhone, mensajeInicialAsesor, { maxAttempts: 1 });
   } catch (error) {
     resultadoTexto = { ok: false, error };
   }
 
   if (resultadoTexto?.ok) {
+    console.log("[ASESOR_DEBUG] Texto libre asesor enviado; no se usará plantilla", {
+      asesorId,
+      asesorPhone,
+      paciente: sesionAsesor?.paciente || null,
+      origen: sesionAsesor?.origen || null
+    });
     sesionAsesor.notificacionInicialAsesorPendiente = false;
     sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = null;
     guardarSesionAsesor(asesorId, sesionAsesor);
@@ -2370,9 +2445,10 @@ async function manejarColaAsesorSeguirEsperando(paciente) {
   }
 
   console.log("[COLA_ASESOR] Paciente decide seguir esperando", { paciente });
-  await enviarOpcionesColaAsesor(
+  await enviarBotones(
     paciente,
-    "\u23f3 Seguimos buscando un asesor disponible para continuar contigo. Gracias por tu paciencia \ud83d\udc99"
+    "\u23f3 Seguimos buscando un asesor disponible para continuar contigo. Gracias por tu paciencia \ud83d\udc99\n\nTe notificaremos autom\u00e1ticamente cuando un asesor est\u00e9 disponible.",
+    [botonMenuPrincipal()]
   );
 }
 
@@ -8124,7 +8200,7 @@ function botonMenuPrincipal() {
 }
 
 function botonVolverAreasCotizacion() {
-  return boton("cot_area_back", "Volver atras");
+  return boton("cot_area_back", "\u2b05\ufe0f Volver atr\u00e1s");
 }
 
 function botonVolverCotizar() {
@@ -8381,7 +8457,7 @@ function construirMensajeAreasCotizacion(areas) {
 ${listadoAreas}
 
 Responde con el numero del area para ver sus servicios.
-Ejemplo: escribe 1 para seleccionar la primera opcion.`;
+Ejemplo: escribe 1 para seleccionar la primera opción.`;
 }
 
 function obtenerIndiceDesdeTexto(text) {
@@ -10544,7 +10620,7 @@ async function enviarServiciosCotizacionConNavegacion(to, area, servicios) {
   await enviarListadoCotizacionConNavegacion(
     to,
     construirMensajeServiciosCotizacion(area, servicios),
-    boton(construirIdVolverServicioCotizacion(), "Volver atras")
+    boton(construirIdVolverServicioCotizacion(), "\u2b05\ufe0f Volver atr\u00e1s")
   );
 }
 
@@ -11194,7 +11270,7 @@ async function enviarMensajeTexto(to, message) {
   }
 }
 
-async function enviarMensajeTextoConResultado(to, message) {
+async function enviarMensajeTextoConResultado(to, message, options = {}) {
   const payload = {
     messaging_product: "whatsapp",
     to,
@@ -11210,7 +11286,7 @@ async function enviarMensajeTextoConResultado(to, message) {
   });
 
   try {
-    await enviarWhatsApp(payload);
+    await enviarWhatsApp(payload, options);
     console.log("[WHATSAPP_TEXT] Despues await enviarWhatsApp estricto:", {
       to,
       length: String(message || "").length
@@ -11502,7 +11578,7 @@ async function reenviarVideoWhatsApp(destino, message) {
   }
 }
 
-async function enviarWhatsApp(payload) {
+async function enviarWhatsApp(payload, options = {}) {
   if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
     console.warn("[CONFIG] Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en las variables de entorno.");
     return;
@@ -11515,7 +11591,10 @@ async function enviarWhatsApp(payload) {
     type: payload.type
   });
 
-  const maxAttempts = 2;
+  const maxAttemptsConfig = Number.parseInt(options.maxAttempts || "2", 10);
+  const maxAttempts = Number.isInteger(maxAttemptsConfig) && maxAttemptsConfig > 0
+    ? maxAttemptsConfig
+    : 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
