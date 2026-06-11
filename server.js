@@ -55,6 +55,10 @@ const APPOINTMENT_ALLOWED_PHONES = (process.env.APPOINTMENT_ALLOWED_PHONES || "0
   .split(",")
   .map(normalizarNumeroWhatsApp)
   .filter(Boolean);
+const FAMYBOT_IA_ALLOWED_PHONES = (process.env.FAMYBOT_IA_ALLOWED_PHONES || "+593990043768")
+  .split(",")
+  .map(normalizarNumeroWhatsApp)
+  .filter(Boolean);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
 const INTERNAL_NOTIFICATION_EMAIL = process.env.INTERNAL_NOTIFICATION_EMAIL || process.env.RESULTS_INTERNAL_EMAIL;
 const INTERNAL_EMAIL_FROM = process.env.INTERNAL_EMAIL_FROM || process.env.RESULTS_EMAIL_FROM;
@@ -212,6 +216,10 @@ function normalizarNumeroWhatsApp(numero) {
 
 function puedeUsarAgendamiento(numeroUsuario) {
   return featureHabilitada(ENABLE_APPOINTMENT_BOOKING);
+}
+
+function puedeProbarFamyBotIA(numeroUsuario) {
+  return FAMYBOT_IA_ALLOWED_PHONES.includes(normalizarNumeroWhatsApp(numeroUsuario));
 }
 
 function esNumeroInterno(numero) {
@@ -404,7 +412,14 @@ const MENUS = {
     buttons: [
       boton("main_proveedores", "Proveedores"),
       boton("main_alianzas", "Alianzas estratég."),
-      boton("main_trabaja", "Trabaja con nosotros")
+      boton("main_mas_opciones_2", "Más opciones")
+    ]
+  },
+  principalMasOpciones2: {
+    text: "Elige una opción:",
+    buttons: [
+      boton("main_trabaja", "Trabaja con nosotros"),
+      boton("main_famybot_ia", "Habla con FamyBot IA")
     ]
   },
   proveedoresEntrada: {
@@ -532,11 +547,13 @@ const ACCIONES_BOTONES = {
   main_atenderme: { type: "menu", menu: "pacientes" },
   main_empresas: { type: "menu", menu: "empresas" },
   main_mas_opciones: { type: "menu", menu: "principalMasOpciones" },
+  main_mas_opciones_2: { type: "menu", menu: "principalMasOpciones2" },
   main_proveedores: { type: "menu", menu: "proveedoresEntrada" },
   main_proveedor: { type: "menu", menu: "proveedores" },
   main_alianzas: { type: "menu", menu: "alianzasEntrada" },
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text_with_main_menu", text: TEXTOS.trabaja },
+  main_famybot_ia: { type: "famybot_ia" },
   cot_area_back: { type: "quote_area_back" },
   cot_servicio_back: { type: "quote_service_back" },
   volver_cotizar: { type: "restart_quote" },
@@ -3138,6 +3155,32 @@ async function manejarBoton(to, buttonId, messageId) {
       }
     });
     await enviarMensajeConMenuPrincipal(to, accion.text);
+    return;
+  }
+
+  if (accion.type === "famybot_ia") {
+    const textoFamyBotIA = puedeProbarFamyBotIA(to)
+      ? `🧪 Bienvenida a las pruebas de FamyBot IA.
+
+Esta función aún se encuentra en desarrollo y por el momento está habilitada únicamente para pruebas internas.
+
+En las siguientes fases podrás conversar libremente con FamyBot IA y probar nuevas capacidades antes de su lanzamiento al público.`
+      : `🤖 FamyBot IA se encuentra actualmente en desarrollo.
+
+Mientras tanto, puedes utilizar las opciones disponibles en el menú para consultar información, agendar citas, cotizar servicios o comunicarte con un asesor.
+
+Próximamente podrás conversar con FamyBot IA de forma más natural y recibir asistencia personalizada.`;
+
+    registrarEvento(to, "flow_completed", {
+      messageId,
+      buttonId,
+      flowKey: buttonId,
+      payload: {
+        actionType: accion.type,
+        allowed: puedeProbarFamyBotIA(to)
+      }
+    });
+    await enviarMensajeConMenuPrincipal(to, textoFamyBotIA);
     return;
   }
 
