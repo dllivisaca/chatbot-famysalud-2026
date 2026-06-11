@@ -211,8 +211,7 @@ function normalizarNumeroWhatsApp(numero) {
 }
 
 function puedeUsarAgendamiento(numeroUsuario) {
-  return featureHabilitada(ENABLE_APPOINTMENT_BOOKING)
-    && APPOINTMENT_ALLOWED_PHONES.includes(normalizarNumeroWhatsApp(numeroUsuario));
+  return featureHabilitada(ENABLE_APPOINTMENT_BOOKING);
 }
 
 function esNumeroInterno(numero) {
