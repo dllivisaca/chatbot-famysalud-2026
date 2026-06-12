@@ -55,11 +55,16 @@ const APPOINTMENT_ALLOWED_PHONES = (process.env.APPOINTMENT_ALLOWED_PHONES || "0
   .split(",")
   .map(normalizarNumeroWhatsApp)
   .filter(Boolean);
-const FAMYBOT_IA_ALLOWED_PHONES = (process.env.FAMYBOT_IA_ALLOWED_PHONES || "+593990043768")
+const FAMYBOT_IA_ALLOWED_PHONES = (process.env.FAMYBOT_IA_ALLOWED_PHONES || "0990043768,+593990043768")
   .split(",")
   .map(normalizarNumeroWhatsApp)
   .filter(Boolean);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
+const FAMYBOT_IA_API_URL = process.env.FAMYBOT_IA_API_URL || "";
+const FAMYBOT_IA_API_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.FAMYBOT_IA_API_TIMEOUT_MS || "15000", 10);
+const FAMYBOT_IA_API_TIMEOUT_MS = Number.isInteger(FAMYBOT_IA_API_TIMEOUT_MS_CONFIG) && FAMYBOT_IA_API_TIMEOUT_MS_CONFIG > 0
+  ? FAMYBOT_IA_API_TIMEOUT_MS_CONFIG
+  : 15000;
 const INTERNAL_NOTIFICATION_EMAIL = process.env.INTERNAL_NOTIFICATION_EMAIL || process.env.RESULTS_INTERNAL_EMAIL;
 const INTERNAL_EMAIL_FROM = process.env.INTERNAL_EMAIL_FROM || process.env.RESULTS_EMAIL_FROM;
 const SMTP_HOST = process.env.SMTP_HOST;
@@ -135,6 +140,7 @@ const sesionesResultados = new Map();
 const sesionesResultadosEmpresas = new Map();
 const sesionesProveedor = new Map();
 const sesionesAlianza = new Map();
+const sesionesFamyBotIA = new Map();
 const mensajesProcesados = new Map();
 const confirmacionesPayphoneProcesadas = new Map();
 const temporizadoresSesion = new Map();
@@ -3159,12 +3165,21 @@ async function manejarBoton(to, buttonId, messageId) {
   }
 
   if (accion.type === "famybot_ia") {
-    const textoFamyBotIA = puedeProbarFamyBotIA(to)
+    const autorizadoFamyBotIA = puedeProbarFamyBotIA(to);
+
+    if (autorizadoFamyBotIA) {
+      sesionesFamyBotIA.set(to, {
+        timestamp: Date.now(),
+        sessionId: obtenerSessionId(to)
+      });
+    } else {
+      sesionesFamyBotIA.delete(to);
+    }
+
+    const textoFamyBotIA = autorizadoFamyBotIA
       ? `🧪 Bienvenida a las pruebas de FamyBot IA.
 
-Esta función aún se encuentra en desarrollo y por el momento está habilitada únicamente para pruebas internas.
-
-En las siguientes fases podrás conversar libremente con FamyBot IA y probar nuevas capacidades antes de su lanzamiento al público.`
+Ya puedes escribir tu consulta para FamyBot IA.`
       : `🤖 FamyBot IA se encuentra actualmente en desarrollo.
 
 Mientras tanto, puedes utilizar las opciones disponibles en el menú para consultar información, agendar citas, cotizar servicios o comunicarte con un asesor.
@@ -3177,7 +3192,7 @@ Próximamente podrás conversar con FamyBot IA de forma más natural y recibir a
       flowKey: buttonId,
       payload: {
         actionType: accion.type,
-        allowed: puedeProbarFamyBotIA(to)
+        allowed: autorizadoFamyBotIA
       }
     });
     await enviarMensajeConMenuPrincipal(to, textoFamyBotIA);
@@ -6172,18 +6187,97 @@ async function volverAgendamiento(to, messageId) {
   await enviarMenu(to, "pacientes");
 }
 
-async function manejarRespuestaIA(from, text, messageId) {
-  registrarEvento(from, "invalid_message", {
-    messageId,
-    payload: {
-      reason: "ai_response_stub",
-      aiEnabled: true,
-      stub: true,
-      textLength: text.length
-    }
-  });
+function construirMensajeRespuestaIA(data) {
+  const bloques = [];
+  const mensaje = String(data?.mensaje || "").trim();
 
-  await enviarMenu(from, "principal");
+  if (mensaje) {
+    bloques.push(mensaje);
+  }
+
+  if (data?.accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
+    const opciones = data.resultados
+      .map((resultado, index) => {
+        const nombre = resultado?.nombre || resultado?.name || resultado?.title || `Opcion ${index + 1}`;
+        const precio = resultado?.precio ?? resultado?.price;
+        const textoPrecio = precio !== undefined && precio !== null && String(precio).trim() !== ""
+          ? ` - ${precio}`
+          : "";
+
+        return `${index + 1}. ${nombre}${textoPrecio}`;
+      })
+      .join("\n");
+
+    bloques.push(opciones);
+  }
+
+  return bloques.join("\n\n").trim() || "FamyBot IA procesó tu consulta, pero no devolvió un mensaje para mostrar.";
+}
+
+async function manejarRespuestaIA(from, text, messageId) {
+  const modoIAActivo = sesionesFamyBotIA.has(from);
+
+  if (!featureHabilitada(ENABLE_AI_RESPONSES) || !puedeProbarFamyBotIA(from) || !modoIAActivo || !FAMYBOT_IA_API_URL.trim()) {
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      payload: {
+        reason: "ai_response_not_available",
+        aiEnabled: featureHabilitada(ENABLE_AI_RESPONSES),
+        allowed: puedeProbarFamyBotIA(from),
+        modeActive: modoIAActivo,
+        apiConfigured: Boolean(FAMYBOT_IA_API_URL.trim()),
+        textLength: text.length
+      }
+    });
+
+    await enviarMenu(from, "principal");
+    return;
+  }
+
+  try {
+    const apiResponse = await axios.post(
+      FAMYBOT_IA_API_URL,
+      {
+        texto: text,
+        phone: from,
+        messageId,
+        sessionId: obtenerSessionId(from)
+      },
+      {
+        timeout: FAMYBOT_IA_API_TIMEOUT_MS
+      }
+    );
+
+    const data = apiResponse.data || {};
+    registrarEvento(from, "ai_response", {
+      messageId,
+      payload: {
+        intent: data.intencion,
+        action: data.accion,
+        confidence: data.confianza
+      }
+    });
+
+    await enviarMensajeConMenuPrincipal(from, construirMensajeRespuestaIA(data));
+  } catch (error) {
+    console.error("[FAMYBOT_IA] Error consultando API:", construirDetalleErrorLog(error, {
+      action: "famybot_ia_chat",
+      messageId,
+      phone: from
+    }));
+    registrarEvento(from, "ai_response_error", {
+      messageId,
+      payload: {
+        reason: "api_error",
+        error: error.message
+      }
+    });
+
+    await enviarMensajeConMenuPrincipal(
+      from,
+      "En este momento FamyBot IA no pudo procesar tu consulta. Puedes intentar nuevamente o volver al menú principal."
+    );
+  }
 }
 
 async function reiniciarCotizacion(from, messageId) {
@@ -8042,6 +8136,7 @@ function limpiarSesionesUsuario(from) {
   eliminarSesionAgendamiento(from, sessionId);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  sesionesFamyBotIA.delete(from);
   limpiarSesionProveedor(from);
   sesionesExpiradas.delete(from);
   cancelarExpiracionSesion(from);
@@ -8094,6 +8189,7 @@ async function expirarSesionUsuario(from) {
   eliminarSesionAgendamiento(from, sessionId);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  sesionesFamyBotIA.delete(from);
   limpiarSesionProveedor(from);
   limpiarSesionAlianza(from);
   cancelarExpiracionSesion(from);
@@ -8146,6 +8242,7 @@ function consumirSesionUsuarioExpirada(from) {
   eliminarSesionAgendamiento(from, sessionId);
   sesionesResultados.delete(from);
   sesionesResultadosEmpresas.delete(from);
+  sesionesFamyBotIA.delete(from);
   limpiarSesionProveedor(from);
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
