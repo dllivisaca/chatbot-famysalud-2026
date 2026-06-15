@@ -1013,6 +1013,43 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+app.get("/test-template", async (req, res) => {
+  const to = "593990043768";
+  const templateName = "nuevo_paciente_asesor";
+  const languageCode = "es_EC";
+  const payload = construirPayloadPlantillaWhatsApp(to, templateName, languageCode);
+
+  console.log("[TEST_TEMPLATE] Antes de enviar plantilla WhatsApp:", {
+    to,
+    templateName,
+    languageCode,
+    phoneNumberId: PHONE_NUMBER_ID || null
+  });
+  console.log("[TEST_TEMPLATE] Payload enviado:", JSON.stringify(payload, null, 2));
+
+  try {
+    const response = await enviarWhatsApp(payload, { maxAttempts: 1 });
+
+    console.log("[TEST_TEMPLATE] Respuesta exitosa de Meta:", {
+      status: response?.status || null,
+      data: response?.data || null
+    });
+
+    return res.status(response?.status || 200).json(response?.data || {});
+  } catch (error) {
+    console.error("[TEST_TEMPLATE] Error completo de Meta:", error.response?.data || error.message || error);
+
+    if (error.response?.data) {
+      return res.status(error.response.status || 502).json(error.response.data);
+    }
+
+    return res.status(502).json({
+      ok: false,
+      error: error.message || String(error)
+    });
+  }
+});
+
 // Recibe mensajes entrantes desde WhatsApp Cloud API.
 app.post("/webhook", async (req, res) => {
   const message = extraerMensaje(req.body);
@@ -1053,6 +1090,11 @@ app.post("/webhook", async (req, res) => {
     marcarMensajeProcesado(messageId, now);
 
     if (await manejarRespuestaFeriadoAsesorPrincipal(from, rawText)) {
+      return res.sendStatus(200);
+    }
+
+    if (esBotonMenuPrincipalAsesor(buttonId) && estaEnFlujoAsesor(from)) {
+      await manejarColaAsesorMenuPrincipal(from);
       return res.sendStatus(200);
     }
 
@@ -1688,6 +1730,14 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   const esAlianzaPotencial = origen === "alianza_potencial";
   const esAlianzaExistente = origen === "alianza_existente";
   const sesionExistente = obtenerSesionAsesorPorPaciente(paciente);
+  console.log("[ASESOR_FLOW_DEBUG] Entrada iniciarSesionAsesor", {
+    paciente,
+    messageId,
+    buttonId,
+    origen,
+    colaPendiente: colaEsperaAsesor.length,
+    asesores: obtenerEstadoAsesores()
+  });
   console.log(esAlianzaPotencial || esAlianzaExistente ? "[ALIANZA_ASESOR] Solicita hablar con asesor:" : esProveedor || esProveedorExistente ? "[PROVEEDOR_ASESOR] Solicita hablar con asesor:" : esEmpresa ? "[EMPRESA_ASESOR] Solicita hablar con asesor:" : "[PACIENTE] Solicita hablar con asesor:", {
     paciente,
     origen,
@@ -1695,6 +1745,11 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   });
 
   if (sesionExistente) {
+    console.log("[ASESOR_FLOW_DEBUG] Decisión iniciarSesionAsesor", {
+      decision: "no_crear_nueva_asignacion",
+      motivo: "sesion_existente_para_paciente",
+      ...obtenerContextoDebugAsesor(sesionExistente.asesorId, sesionExistente)
+    });
     console.warn("[ASESOR_DEBUG] No se notificó asesor", {
       razon: "sesion_existente",
       asesorId: sesionExistente.asesorId || null,
@@ -1711,6 +1766,14 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   }
 
   if (!(await estaEnHorarioLaboralAsesor())) {
+    console.log("[ASESOR_FLOW_DEBUG] Decisión iniciarSesionAsesor", {
+      decision: "no_notificar_asesor",
+      motivo: "fuera_horario_laboral_asesor",
+      paciente,
+      origen,
+      colaPendiente: colaEsperaAsesor.length,
+      asesores: obtenerEstadoAsesores()
+    });
     console.log("[ASESOR_HORARIO] Solicitud fuera de horario laboral:", {
       paciente,
       origen
@@ -1729,9 +1792,26 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   }
 
   const asesorLibre = obtenerAsesorLibre();
+  console.log("[ASESOR_FLOW_DEBUG] Decisión asesor libre", {
+    decision: asesorLibre ? "asesor_libre_encontrado" : "sin_asesor_libre",
+    asesorId: asesorLibre?.id || null,
+    asesorPhone: asesorLibre?.phone || null,
+    asesorNombre: asesorLibre?.nombre || asesorLibre?.id || null,
+    paciente,
+    origen,
+    colaPendiente: colaEsperaAsesor.length,
+    asesores: obtenerEstadoAsesores()
+  });
 
   if (!asesorLibre) {
     if (agregarPacienteAColaAsesor(paciente, origen)) {
+      console.log("[ASESOR_FLOW_DEBUG] Salida iniciarSesionAsesor", {
+        resultado: "paciente_agregado_a_cola",
+        motivo: "sin_asesor_libre",
+        paciente,
+        origen,
+        totalEnCola: colaEsperaAsesor.length
+      });
       console.warn("[ASESOR_DEBUG] No se notificó asesor", {
         razon: "sin_asesor_libre_paciente_en_cola",
         paciente,
@@ -1770,6 +1850,13 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       origen,
       totalEnCola: colaEsperaAsesor.length
     });
+    console.log("[ASESOR_FLOW_DEBUG] Salida iniciarSesionAsesor", {
+      resultado: "paciente_ya_estaba_en_cola",
+      motivo: "sin_asesor_libre",
+      paciente,
+      origen,
+      totalEnCola: colaEsperaAsesor.length
+    });
     console.warn("[ASESOR_DEBUG] No se notificó asesor", {
       razon: "paciente_ya_en_cola",
       paciente,
@@ -1792,6 +1879,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   console.log("[ASESOR_DEBUG] Asesor seleccionado para asignación", {
     asesorId: asesorLibre.id,
     asesorPhone: asesorLibre.phone,
+    asesorNombre: asesorLibre.nombre || asesorLibre.id || null,
     paciente,
     origen
   });
@@ -1800,11 +1888,7 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
 
   console.log("[SESION] Asesor esperando nombre:", sesionAsesor);
   console.log("[ASESOR_DEBUG] Sesión asesor guardada antes de notificar", {
-    asesorId: sesionAsesor.asesorId,
-    asesorPhone: obtenerTelefonoSesionAsesor(sesionAsesor),
-    paciente: sesionAsesor.paciente,
-    estado: sesionAsesor.estado,
-    origen: sesionAsesor.origen
+    ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor)
   });
   registrarEvento(paciente, "advisor_session_requested", {
     messageId,
@@ -1812,26 +1896,34 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     flowKey: obtenerFlowKeyAsesor(origen)
   });
 
-  await enviarMensajeTexto(
-    paciente,
-    esAlianzaExistente
-      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos como aliado estratégico. Por favor espera un momento 😊"
-      : esAlianzaPotencial
-      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos por una posible alianza estratégica. Por favor espera un momento 😊"
-      : esProveedorExistente
-      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos como proveedor. Por favor espera un momento 😊"
-      : esProveedor
-      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de proveedores. Por favor espera un momento 😊"
-      : esEmpresa
-      ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de servicios para empresas. Por favor espera un momento 😊"
-      : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
-  );
+  try {
+    await enviarMensajeTexto(
+      paciente,
+      esAlianzaExistente
+        ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos como aliado estratégico. Por favor espera un momento 😊"
+        : esAlianzaPotencial
+        ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos por una posible alianza estratégica. Por favor espera un momento 😊"
+        : esProveedorExistente
+        ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos como proveedor. Por favor espera un momento 😊"
+        : esProveedor
+        ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de proveedores. Por favor espera un momento 😊"
+        : esEmpresa
+        ? "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nGracias por contactarnos desde el área de servicios para empresas. Por favor espera un momento 😊"
+        : "💬 Claro, en un momento uno de nuestros asesores de FamySALUD te atenderá.\n\nPor favor espera un momento 😊"
+    );
+  } catch (error) {
+    console.warn("[ASESOR_FLOW] No se pudo enviar confirmación al paciente, se continuará notificando al asesor:", {
+      paciente,
+      origen,
+      asesorId: sesionAsesor.asesorId,
+      asesorPhone: obtenerTelefonoSesionAsesor(sesionAsesor),
+      error: error.response?.data || error.message || error
+    });
+  }
   const mensajeInicialAsesor = construirMensajeInicialAsesorDesdeSesion(sesionAsesor);
   console.log("[ASESOR_DEBUG] Llamando notificación con fallback", {
-    asesorId: sesionAsesor.asesorId,
-    asesorPhone: obtenerTelefonoSesionAsesor(sesionAsesor),
-    paciente: sesionAsesor.paciente,
-    origen: sesionAsesor.origen
+    ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor),
+    mensajeLength: String(mensajeInicialAsesor || "").length
   });
   const notificacionAsesor = await notificarAsignacionAsesorConFallbackPlantilla(
     sesionAsesor.asesorId,
@@ -1840,6 +1932,11 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   );
 
   if (!notificacionAsesor.ok) {
+    console.log("[ASESOR_FLOW_DEBUG] Salida iniciarSesionAsesor", {
+      resultado: "notificacion_asesor_fallida",
+      ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor),
+      error: notificacionAsesor.error?.response?.data || notificacionAsesor.error?.message || notificacionAsesor.error
+    });
     console.warn("[ASESOR_DEBUG] No se notificó asesor", {
       razon: "notificacion_fallida",
       asesorId: sesionAsesor.asesorId,
@@ -1858,6 +1955,12 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     });
     return;
   }
+
+  console.log("[ASESOR_FLOW_DEBUG] Salida iniciarSesionAsesor", {
+    resultado: "notificacion_asesor_ok",
+    ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor),
+    motivo: "notificarAsignacionAsesorConFallbackPlantilla_ok"
+  });
 }
 
 function construirMensajeReintentoSolicitudAsesor(origen = "paciente") {
@@ -1903,19 +2006,57 @@ function obtenerTelefonoSesionAsesor(sesionAsesor) {
   return sesionAsesor?.asesor?.phone || sesionAsesor?.asesor?.telefono || null;
 }
 
-function marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor) {
+function obtenerContextoDebugAsesor(asesorId, sesionAsesor = {}) {
+  const asesorConfig = ASESORES_WHATSAPP.find((asesor) => asesor.id === asesorId) || null;
+  const sesionActual = obtenerSesionAsesor(asesorId) || sesionAsesor || {};
+  const asesorPhone = obtenerTelefonoSesionAsesor(sesionAsesor) || obtenerTelefonoSesionAsesor(sesionActual) || asesorConfig?.phone || null;
+
+  return {
+    asesorId: asesorId || sesionAsesor?.asesorId || null,
+    asesorPhone,
+    asesorNombre: sesionAsesor?.nombreAsesor || sesionActual?.nombreAsesor || sesionAsesor?.nombreTemporalAsesor || sesionActual?.nombreTemporalAsesor || asesorConfig?.nombre || asesorId || null,
+    asesorCargo: sesionAsesor?.cargoAsesor || sesionActual?.cargoAsesor || null,
+    asesorEstado: sesionActual?.estado || sesionAsesor?.estado || "sin_sesion",
+    paciente: sesionAsesor?.paciente || sesionActual?.paciente || null,
+    origen: sesionAsesor?.origen || sesionActual?.origen || null,
+    notificacionInicialAsesorPendiente: Boolean(sesionActual?.notificacionInicialAsesorPendiente || sesionAsesor?.notificacionInicialAsesorPendiente),
+    plantillaNuevoPacienteAsesorEnviadaEn: sesionActual?.plantillaNuevoPacienteAsesorEnviadaEn || sesionAsesor?.plantillaNuevoPacienteAsesorEnviadaEn || null,
+    mensajeInicialAsesorPendiente: Boolean(sesionActual?.mensajeInicialAsesorPendiente || sesionAsesor?.mensajeInicialAsesorPendiente)
+  };
+}
+
+function obtenerContextoDebugAsesorPorTelefono(phone) {
+  const asesor = obtenerAsesorPorTelefono(phone);
+
+  if (!asesor) {
+    return {
+      asesorDetectado: false,
+      asesorPhone: phone || null,
+      asesorNombre: null,
+      asesorEstado: null
+    };
+  }
+
+  return {
+    asesorDetectado: true,
+    ...obtenerContextoDebugAsesor(asesor.id, obtenerSesionAsesor(asesor.id) || { asesor: phone })
+  };
+}
+
+function marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor, mensajeInicialAsesor = "") {
   sesionAsesor.notificacionInicialAsesorPendiente = true;
   sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = Date.now();
+  sesionAsesor.mensajeInicialAsesorPendiente = mensajeInicialAsesor;
   guardarSesionAsesor(asesorId, sesionAsesor);
 }
 
 async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAsesor, mensajeInicialAsesor) {
   const asesorPhone = obtenerTelefonoSesionAsesor(sesionAsesor);
+  const contextoAsesor = obtenerContextoDebugAsesor(asesorId, sesionAsesor);
   console.log("[ASESOR_DEBUG] Entró a notificarAsignacionAsesorConFallbackPlantilla", {
-    asesorId,
-    asesorPhone,
-    paciente: sesionAsesor?.paciente || null,
-    origen: sesionAsesor?.origen || null
+    ...contextoAsesor,
+    ventanaWhatsApp: "desconocida_antes_de_intentar_texto",
+    mensajeLength: String(mensajeInicialAsesor || "").length
   });
 
   if (!asesorPhone) {
@@ -1926,9 +2067,19 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
 
     console.warn("[ASESOR_DEBUG] No se notificó asesor", {
       razon: "asesor_sin_telefono",
-      asesorId,
+      ...contextoAsesor,
       paciente: sesionAsesor?.paciente || null,
       origen: sesionAsesor?.origen || null
+    });
+    console.warn("[PLANTILLA_DEBUG] No se enviará plantilla", {
+      razon: "asesor_sin_telefono",
+      ...contextoAsesor,
+      ventanaWhatsApp: "no_evaluada"
+    });
+    console.log("[ASESOR_DEBUG] Salida notificarAsignacionAsesorConFallbackPlantilla", {
+      resultado: "error",
+      motivo: "asesor_sin_telefono",
+      ...contextoAsesor
     });
 
     return {
@@ -1940,9 +2091,20 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
   let resultadoTexto;
 
   try {
+    console.warn("[ASESOR_FALLBACK] Intentando texto libre al asesor", {
+      ...contextoAsesor,
+      maxAttempts: 1,
+      mensajeLength: String(mensajeInicialAsesor || "").length
+    });
     console.log("[ASESOR_DEBUG] Intentando texto libre asesor con maxAttempts=1", {
-      asesorPhone,
-      paciente: sesionAsesor?.paciente || null
+      ...contextoAsesor,
+      motivo: "probar_ventana_whatsapp_con_texto_libre",
+      ventanaWhatsApp: "desconocida_antes_de_intentar_texto"
+    });
+    console.log("[PLANTILLA_DEBUG] No se enviará plantilla", {
+      razon: "primero_se_intenta_texto_libre_para_confirmar_si_la_ventana_esta_abierta",
+      ...contextoAsesor,
+      ventanaWhatsApp: "desconocida_antes_de_intentar_texto"
     });
     resultadoTexto = await enviarMensajeTextoConResultado(asesorPhone, mensajeInicialAsesor, { maxAttempts: 1 });
   } catch (error) {
@@ -1950,53 +2112,108 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
   }
 
   if (resultadoTexto?.ok) {
+    console.warn("[ASESOR_FALLBACK] Texto libre aceptado, no se enviará plantilla", {
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      responseStatus: resultadoTexto?.response?.status || null
+    });
     console.log("[ASESOR_DEBUG] Texto libre asesor enviado; no se usará plantilla", {
-      asesorId,
-      asesorPhone,
-      paciente: sesionAsesor?.paciente || null,
-      origen: sesionAsesor?.origen || null
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      motivo: "texto_libre_aceptado_por_meta",
+      ventanaWhatsApp: "abierta_inferida_por_texto_aceptado"
+    });
+    console.log("[PLANTILLA_DEBUG] No se enviará plantilla", {
+      razon: "texto_libre_aceptado_por_meta",
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      ventanaWhatsApp: "abierta_inferida_por_texto_aceptado"
     });
     sesionAsesor.notificacionInicialAsesorPendiente = false;
     sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = null;
+    sesionAsesor.mensajeInicialAsesorPendiente = null;
     guardarSesionAsesor(asesorId, sesionAsesor);
+    console.log("[ASESOR_DEBUG] Salida notificarAsignacionAsesorConFallbackPlantilla", {
+      resultado: "ok",
+      canal: "texto_libre",
+      motivo: "texto_libre_aceptado_por_meta",
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      ventanaWhatsApp: "abierta_inferida_por_texto_aceptado"
+    });
     return resultadoTexto;
   }
 
   console.warn("[ASESOR] Texto libre rechazado o falló. Enviando plantilla de nueva asignación.", {
-    asesorId,
-    asesorPhone,
+    ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+    motivo: "texto_libre_rechazado_o_fallido",
+    ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto",
     error: resultadoTexto?.error?.response?.data || resultadoTexto?.error?.message || resultadoTexto?.error
   });
 
-  marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor);
+  console.warn("[ASESOR_FALLBACK] Texto libre falló, se enviará plantilla", {
+    ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+    error: resultadoTexto?.error?.response?.data || resultadoTexto?.error?.message || resultadoTexto?.error
+  });
+
+  marcarNotificacionInicialAsesorPendiente(asesorId, sesionAsesor, mensajeInicialAsesor);
+  console.warn("[ASESOR_FALLBACK] Mensaje contextual pendiente guardado", {
+    ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+    mensajeLength: String(mensajeInicialAsesor || "").length
+  });
 
   console.log("[ASESOR_TEMPLATE_FALLBACK] Intentando plantilla...", {
-    asesorId,
-    asesorPhone,
+    ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
     templateName: "nuevo_paciente_asesor",
-    languageCode: TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE
+    languageCode: "es_EC",
+    motivo: "fallback_por_texto_libre_rechazado_o_fallido",
+    ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto"
   });
-  const resultadoPlantilla = await enviarPlantillaNuevoPacienteAsesorConResultado(asesorPhone);
+  console.log("[PLANTILLA_DEBUG] Se intentará enviar plantilla", {
+    razon: "texto_libre_rechazado_o_fallido",
+    ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+    templateName: "nuevo_paciente_asesor",
+    languageCode: "es_EC",
+    ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto",
+    errorTexto: resultadoTexto?.error?.response?.data || resultadoTexto?.error?.message || resultadoTexto?.error
+  });
+  const resultadoPlantilla = await enviarPlantillaWhatsAppConResultado(asesorPhone, "nuevo_paciente_asesor", "es_EC");
 
   if (!resultadoPlantilla?.ok) {
     console.error("[ASESOR_TEMPLATE_FALLBACK] Error plantilla...", {
-      asesorId,
-      asesorPhone,
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
       error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
     });
     console.error("[ASESOR] También falló envío de plantilla nuevo_paciente_asesor.", {
-      asesorId,
-      asesorPhone,
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
+    });
+    console.log("[ASESOR_DEBUG] Salida notificarAsignacionAsesorConFallbackPlantilla", {
+      resultado: "error",
+      canal: "plantilla",
+      motivo: "plantilla_fallo",
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto",
       error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
     });
   }
 
   if (resultadoPlantilla?.ok) {
-    console.log("[ASESOR_TEMPLATE_FALLBACK] Plantilla enviada...", {
-      asesorId,
-      asesorPhone,
+    console.warn("[ASESOR_FALLBACK] Plantilla enviada", {
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
       templateName: "nuevo_paciente_asesor",
-      languageCode: TEMPLATE_NUEVO_PACIENTE_ASESOR_LANGUAGE
+      languageCode: "es_EC",
+      responseStatus: resultadoPlantilla?.response?.status || null
+    });
+    console.log("[ASESOR_TEMPLATE_FALLBACK] Plantilla enviada...", {
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      templateName: "nuevo_paciente_asesor",
+      languageCode: "es_EC",
+      motivo: "plantilla_aceptada_por_meta",
+      ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto"
+    });
+    console.log("[ASESOR_DEBUG] Salida notificarAsignacionAsesorConFallbackPlantilla", {
+      resultado: "ok",
+      canal: "plantilla",
+      motivo: "plantilla_aceptada_por_meta",
+      ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
+      ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto"
     });
   }
 
@@ -2101,12 +2318,19 @@ async function manejarMensajeAsesor(from, rawText, message) {
   const mensaje = (rawText || "").trim();
 
   if (sesionAsesor.notificacionInicialAsesorPendiente === true) {
-    const mensajeInicialAsesor = construirMensajeInicialAsesorDesdeSesion(sesionAsesor);
-    const resultadoPendiente = await enviarMensajeTextoConResultado(from, mensajeInicialAsesor);
+    const mensajeInicialAsesor = sesionAsesor.mensajeInicialAsesorPendiente || construirMensajeInicialAsesorDesdeSesion(sesionAsesor);
+    console.warn("[ASESOR_FALLBACK] Enviando mensaje contextual pendiente tras respuesta del asesor", {
+      ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor),
+      asesor: from,
+      respuestaAsesorLength: mensaje.length,
+      mensajeLength: String(mensajeInicialAsesor || "").length
+    });
+    const resultadoPendiente = await enviarMensajeTextoConResultado(from, mensajeInicialAsesor, { maxAttempts: 1 });
 
     if (resultadoPendiente?.ok) {
       sesionAsesor.notificacionInicialAsesorPendiente = false;
       sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn = null;
+      sesionAsesor.mensajeInicialAsesorPendiente = null;
       guardarSesionAsesor(sesionAsesor.asesorId, sesionAsesor);
       return true;
     }
@@ -2429,6 +2653,10 @@ function botonesColaAsesor() {
   ];
 }
 
+function esBotonMenuPrincipalAsesor(buttonId) {
+  return ["advisor_queue_main_menu", "main_menu", "menu_principal"].includes(buttonId);
+}
+
 async function enviarOpcionesColaAsesor(to, mensaje) {
   ultimosAvisosColaAsesor.set(to, Date.now());
   await enviarBotones(to, mensaje, botonesColaAsesor());
@@ -2479,6 +2707,15 @@ async function manejarColaAsesorMenuPrincipal(paciente) {
   const itemRemovido = quitarPacienteDeColaAsesor(paciente);
   const asesorNotificar = sesionAsesor?.asesor || itemRemovido?.ultimoAsesorNotificado?.phone || null;
 
+  console.warn("[ASESOR_MENU_DEBUG] Usuario solicitó menú principal desde cola/sesión asesor", {
+    paciente,
+    estabaEnCola: Boolean(itemRemovido),
+    teniaSesionAsesor: Boolean(sesionAsesor),
+    asesorId: sesionAsesor?.asesorId || itemRemovido?.ultimoAsesorNotificado?.id || null,
+    asesorPhone: asesorNotificar,
+    estado: sesionAsesor?.estado || null
+  });
+
   if (!itemRemovido) {
     ultimosAvisosColaAsesor.delete(paciente);
     eliminarColaAsesorSeguro(paciente);
@@ -2494,7 +2731,14 @@ async function manejarColaAsesorMenuPrincipal(paciente) {
     removido: Boolean(itemRemovido),
     totalEnCola: colaEsperaAsesor.length
   });
+  console.warn("[ASESOR_MENU_DEBUG] Cola/sesión limpiada correctamente", {
+    paciente,
+    colaPendiente: colaEsperaAsesor.length,
+    sesionAsesorActiva: Boolean(obtenerSesionAsesorPorPaciente(paciente)),
+    asesorNotificado: Boolean(asesorNotificar)
+  });
 
+  limpiarSesionesUsuario(paciente);
   actualizarSesionUsuario(paciente);
   await enviarMenu(paciente, "principal");
 
@@ -2796,7 +3040,24 @@ async function atenderSiguientePacienteEnCola(asesorId) {
   const asesor = ASESORES_WHATSAPP.find((item) => item.id === asesorId);
   const sesionActual = obtenerSesionAsesor(asesorId);
 
+  console.log("[ASESOR_FLOW_DEBUG] Entrada atenderSiguientePacienteEnCola", {
+    asesorId,
+    asesorPhone: asesor?.phone || null,
+    asesorNombre: asesor?.nombre || asesorId || null,
+    asesorEstado: sesionActual?.estado || "sin_sesion",
+    colaPendiente: colaEsperaAsesor.length
+  });
+
   if (!asesor || sesionActual?.estado !== "libre" || colaEsperaAsesor.length === 0) {
+    console.log("[ASESOR_FLOW_DEBUG] Salida atenderSiguientePacienteEnCola", {
+      resultado: "sin_asignacion_desde_cola",
+      motivo: !asesor ? "asesor_no_configurado" : sesionActual?.estado !== "libre" ? "asesor_no_libre" : "cola_vacia",
+      asesorId,
+      asesorPhone: asesor?.phone || null,
+      asesorNombre: asesor?.nombre || asesorId || null,
+      asesorEstado: sesionActual?.estado || "sin_sesion",
+      colaPendiente: colaEsperaAsesor.length
+    });
     return;
   }
 
@@ -2817,6 +3078,11 @@ async function atenderSiguientePacienteEnCola(asesorId) {
     restantesEnCola: colaEsperaAsesor.length
   });
   console.log("[SESION] Asesor esperando nombre desde cola:", sesionAsesor);
+  console.log("[ASESOR_FLOW_DEBUG] Asignación desde cola creada", {
+    ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor),
+    waitMs,
+    restantesEnCola: colaEsperaAsesor.length
+  });
   registrarEvento(sesionAsesor.paciente, "advisor_dequeued", {
     flowKey: obtenerFlowKeyAsesor(sesionAsesor.origen),
     payload: {
@@ -2836,6 +3102,11 @@ async function atenderSiguientePacienteEnCola(asesorId) {
     sesionAsesor,
     construirMensajeInicialAsesorDesdeSesion(sesionAsesor)
   );
+  console.log("[ASESOR_FLOW_DEBUG] Salida atenderSiguientePacienteEnCola", {
+    resultado: "notificacion_desde_cola_invocada",
+    ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor),
+    restantesEnCola: colaEsperaAsesor.length
+  });
 }
 
 async function procesarColaConAsesoresLibres(contexto = "manual") {
@@ -2980,6 +3251,11 @@ async function manejarBoton(to, buttonId, messageId) {
   console.log("[BOTON] Accion resuelta:", accion);
 
   if (accion.type === "main_menu") {
+    if (estaEnFlujoAsesor(to)) {
+      await manejarColaAsesorMenuPrincipal(to);
+      return;
+    }
+
     limpiarSesionesUsuario(to);
     actualizarSesionUsuario(to);
     await enviarMenu(to, "principal");
@@ -11419,46 +11695,114 @@ async function enviarMensajeTextoConResultado(to, message, options = {}) {
     }
   };
 
+  console.log("[WHATSAPP_TEXT_DEBUG] Entrada enviarMensajeTextoConResultado", {
+    to,
+    ...obtenerContextoDebugAsesorPorTelefono(to),
+    type: "text",
+    length: String(message || "").length,
+    maxAttempts: options?.maxAttempts || null,
+    motivo: "intento_texto_libre_estricto"
+  });
   console.log("[WHATSAPP_TEXT] Antes await enviarWhatsApp estricto:", {
     to,
     length: String(message || "").length
   });
 
   try {
-    await enviarWhatsApp(payload, options);
+    const response = await enviarWhatsApp(payload, options);
+    const ok = Boolean(response?.status && response.status >= 200 && response.status < 300);
+
+    if (!ok) {
+      console.warn("[WHATSAPP_TEXT_DEBUG] Envio de texto sin respuesta exitosa clara:", {
+        to,
+        ...obtenerContextoDebugAsesorPorTelefono(to),
+        status: response?.status || null,
+        data: response?.data || null
+      });
+      return {
+        ok: false,
+        error: response?.data || new Error("Envio de texto sin respuesta exitosa clara")
+      };
+    }
+
     console.log("[WHATSAPP_TEXT] Despues await enviarWhatsApp estricto:", {
       to,
       length: String(message || "").length
     });
-    return { ok: true };
+    console.log("[WHATSAPP_TEXT_DEBUG] Salida enviarMensajeTextoConResultado", {
+      to,
+      ...obtenerContextoDebugAsesorPorTelefono(to),
+      resultado: "ok",
+      ventanaWhatsApp: "abierta_inferida_por_texto_aceptado",
+      motivo: "meta_acepto_texto_libre"
+    });
+    return { ok: true, response };
   } catch (error) {
     const detalle = error.response?.data || error.message;
     console.error("[WHATSAPP_TEXT] Error enviando texto estricto:", {
       to,
       error: detalle
     });
+    console.log("[WHATSAPP_TEXT_DEBUG] Salida enviarMensajeTextoConResultado", {
+      to,
+      ...obtenerContextoDebugAsesorPorTelefono(to),
+      resultado: "error",
+      ventanaWhatsApp: "cerrada_o_no_utilizable_inferida_por_fallo_texto",
+      motivo: "meta_rechazo_texto_o_error_http",
+      error: detalle
+    });
     return { ok: false, error: detalle };
   }
 }
 
-async function enviarPlantillaWhatsAppConResultado(to, templateName, languageCode = "es_EC", components = []) {
-  try {
-    const payload = {
-      messaging_product: "whatsapp",
-      to,
-      type: "template",
-      template: {
-        name: templateName,
-        language: {
-          code: languageCode
-        }
+function construirPayloadPlantillaWhatsApp(to, templateName, languageCode = "es_EC", components = []) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: {
+        code: languageCode
       }
-    };
-
-    if (Array.isArray(components) && components.length > 0) {
-      payload.template.components = components;
     }
+  };
 
+  if (Array.isArray(components) && components.length > 0) {
+    payload.template.components = components;
+  }
+
+  return payload;
+}
+
+async function enviarPlantillaWhatsAppConResultado(to, templateName, languageCode = "es_EC", components = []) {
+  console.log("[WHATSAPP_TEMPLATE_DEBUG] Entrada enviarPlantillaWhatsAppConResultado", {
+    to,
+    ...obtenerContextoDebugAsesorPorTelefono(to),
+    templateName,
+    languageCode,
+    componentsCount: Array.isArray(components) ? components.length : 0,
+    motivo: "solicitud_envio_plantilla"
+  });
+  console.log("[PLANTILLA_DEBUG] Se intentará enviar plantilla", {
+    razon: "enviarPlantillaWhatsAppConResultado_invocada",
+    to,
+    ...obtenerContextoDebugAsesorPorTelefono(to),
+    templateName,
+    languageCode,
+    componentsCount: Array.isArray(components) ? components.length : 0
+  });
+
+  try {
+    const payload = construirPayloadPlantillaWhatsApp(to, templateName, languageCode, components);
+
+    console.log("[WHATSAPP_TEMPLATE_DEBUG] Payload plantilla construido", {
+      to,
+      ...obtenerContextoDebugAsesorPorTelefono(to),
+      templateName,
+      languageCode,
+      payload
+    });
     const response = await enviarWhatsApp(payload);
     console.log("[WHATSAPP_TEMPLATE] Plantilla enviada correctamente:", {
       to,
@@ -11466,12 +11810,29 @@ async function enviarPlantillaWhatsAppConResultado(to, templateName, languageCod
       languageCode,
       status: response?.status || null
     });
+    console.log("[WHATSAPP_TEMPLATE_DEBUG] Salida enviarPlantillaWhatsAppConResultado", {
+      to,
+      ...obtenerContextoDebugAsesorPorTelefono(to),
+      templateName,
+      languageCode,
+      resultado: "ok",
+      status: response?.status || null,
+      data: response?.data || null
+    });
     return { ok: true, response };
   } catch (error) {
     console.error("[WHATSAPP_TEMPLATE_ERROR]", {
       to,
       templateName,
       languageCode,
+      error: error?.response?.data || error?.message || error
+    });
+    console.log("[WHATSAPP_TEMPLATE_DEBUG] Salida enviarPlantillaWhatsAppConResultado", {
+      to,
+      ...obtenerContextoDebugAsesorPorTelefono(to),
+      templateName,
+      languageCode,
+      resultado: "error",
       error: error?.response?.data || error?.message || error
     });
 
@@ -11724,6 +12085,17 @@ async function enviarWhatsApp(payload, options = {}) {
   }
 
   const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${PHONE_NUMBER_ID}/messages`;
+  const callerStack = new Error("WHATSAPP_CALLER_TRACE").stack
+    ?.split("\n")
+    .slice(1, 7)
+    .map((line) => line.trim());
+
+  console.warn("[WHATSAPP_CALLER_DEBUG] enviarWhatsApp invocado:", {
+    to: payload?.to || null,
+    type: payload?.type || null,
+    templateName: payload?.template?.name || null,
+    callerStack
+  });
 
   console.log("[WHATSAPP] Enviando respuesta:", {
     to: payload.to,
@@ -11758,7 +12130,7 @@ async function enviarWhatsApp(payload, options = {}) {
         attempt,
         maxAttempts
       });
-      return;
+      return response;
     } catch (error) {
       const puedeReintentar = attempt < maxAttempts && esErrorTransitorioWhatsApp(error);
 
