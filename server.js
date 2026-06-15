@@ -141,6 +141,7 @@ const sesionesResultadosEmpresas = new Map();
 const sesionesProveedor = new Map();
 const sesionesAlianza = new Map();
 const sesionesFamyBotIA = new Map();
+const iaMensajesProcesando = new Map();
 const mensajesProcesados = new Map();
 const notificacionesAsesorPendientesPorWamid = new Map();
 const confirmacionesPayphoneProcesadas = new Map();
@@ -1120,6 +1121,19 @@ app.post("/webhook", async (req, res) => {
     const teniaSesionActiva = sesionUsuarioActiva(from);
     const teniaSessionId = Boolean(obtenerSessionId(from));
 
+    if (!buttonId && !listReplyId && estaEnModoFamyBotIA(from) && puedeProbarFamyBotIA(from)) {
+      if (esSalidaFamyBotIA(text, buttonId)) {
+        sesionesFamyBotIA.delete(from);
+      } else {
+        actualizarSesionUsuario(from);
+        if (!teniaSessionId) {
+          registrarEvento(from, "session_started", { messageId });
+        }
+        await manejarRespuestaIA(from, text, messageId);
+        return res.sendStatus(200);
+      }
+    }
+
     if (debeResetearConversacion(text)) {
       limpiarSesionesUsuario(from);
       actualizarSesionUsuario(from);
@@ -1136,12 +1150,21 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (consumirSesionUsuarioExpirada(from)) {
-      await enviarMensajeTexto(
-        from,
-        "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
-      );
-      await enviarMenu(from, "principal");
+    const sesionConsumida = consumirSesionUsuarioExpirada(from);
+
+    if (sesionConsumida) {
+      if (sesionConsumida.teniaModoFamyBotIA) {
+        await enviarMensajeConMenuPrincipal(
+          from,
+          "La sesión con FamyBot IA finalizó por inactividad. Puedes volver al menú principal para iniciar nuevamente."
+        );
+      } else {
+        await enviarMensajeTexto(
+          from,
+          "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
+        );
+        await enviarMenu(from, "principal");
+      }
       actualizarSesionUsuario(from, { generarNuevaSesion: false });
       return res.sendStatus(200);
     }
@@ -6485,18 +6508,23 @@ async function volverAgendamiento(to, messageId) {
 function construirMensajeRespuestaIA(data) {
   const bloques = [];
   const mensaje = String(data?.mensaje || "").trim();
+  const accion = obtenerAccionRespuestaIA(data);
 
   if (mensaje) {
     bloques.push(mensaje);
   }
 
-  if (data?.accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
-    const opciones = data.resultados
+  if (accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
+    const totalResultados = data.resultados.length;
+    const resultadosIncluidos = data.resultados.slice(0, 10);
+    const opciones = resultadosIncluidos
       .map((resultado, index) => {
-        const nombre = resultado?.nombre || resultado?.name || resultado?.title || `Opcion ${index + 1}`;
-        const precio = resultado?.precio ?? resultado?.price;
+        const nombre = String(resultado?.nombre || resultado?.name || resultado?.title || `Opcion ${index + 1}`)
+          .replace(/\s+/g, " ")
+          .trim();
+        const precio = resultado?.precio ?? resultado?.price ?? resultado?.sale_price;
         const textoPrecio = precio !== undefined && precio !== null && String(precio).trim() !== ""
-          ? ` - ${precio}`
+          ? ` - ${formatearPrecio(precio)}`
           : "";
 
         return `${index + 1}. ${nombre}${textoPrecio}`;
@@ -6504,13 +6532,25 @@ function construirMensajeRespuestaIA(data) {
       .join("\n");
 
     bloques.push(opciones);
+
+    if (totalResultados > resultadosIncluidos.length) {
+      bloques.push("Hay más opciones disponibles. Puedes escribir un nombre más específico.");
+    }
   }
 
   return bloques.join("\n\n").trim() || "FamyBot IA procesó tu consulta, pero no devolvió un mensaje para mostrar.";
 }
 
+function obtenerAccionRespuestaIA(data) {
+  return String(data?.accion || data?.action || "").trim();
+}
+
+function obtenerIntencionRespuestaIA(data) {
+  return String(data?.intencion || data?.intent || "").trim();
+}
+
 async function manejarRespuestaIA(from, text, messageId) {
-  const modoIAActivo = sesionesFamyBotIA.has(from);
+  const modoIAActivo = estaEnModoFamyBotIA(from);
 
   if (!featureHabilitada(ENABLE_AI_RESPONSES) || !puedeProbarFamyBotIA(from) || !modoIAActivo || !FAMYBOT_IA_API_URL.trim()) {
     registrarEvento(from, "invalid_message", {
@@ -6529,7 +6569,32 @@ async function manejarRespuestaIA(from, text, messageId) {
     return;
   }
 
+  if (messageId && iaMensajesProcesando.has(messageId)) {
+    console.warn("[FAMYBOT_IA] Mensaje IA duplicado en proceso; se omite llamada concurrente:", {
+      messageId,
+      from
+    });
+    return;
+  }
+
+  if (messageId) {
+    iaMensajesProcesando.set(messageId, Date.now());
+  }
+
+  const startedAt = Date.now();
+
   try {
+    sesionesFamyBotIA.set(from, {
+      timestamp: Date.now(),
+      sessionId: obtenerSessionId(from)
+    });
+
+    console.warn("[FAMYBOT_IA] Consultando API:", {
+      messageId,
+      from,
+      url: sanearUrlParaLog(FAMYBOT_IA_API_URL)
+    });
+
     const apiResponse = await axios.post(
       FAMYBOT_IA_API_URL,
       {
@@ -6544,21 +6609,49 @@ async function manejarRespuestaIA(from, text, messageId) {
     );
 
     const data = apiResponse.data || {};
+    const totalResultados = Array.isArray(data.resultados) ? data.resultados.length : 0;
+    const accion = obtenerAccionRespuestaIA(data);
+    const intencion = obtenerIntencionRespuestaIA(data);
+
+    console.warn("[FAMYBOT_IA] API respondió:", {
+      messageId,
+      from,
+      url: sanearUrlParaLog(FAMYBOT_IA_API_URL),
+      duracionMs: Date.now() - startedAt,
+      intencion: intencion || null,
+      accion: accion || null,
+      total: totalResultados
+    });
+
     registrarEvento(from, "ai_response", {
       messageId,
       payload: {
-        intent: data.intencion,
-        action: data.accion,
+        intent: intencion,
+        action: accion,
         confidence: data.confianza
       }
     });
 
-    await enviarMensajeConMenuPrincipal(from, construirMensajeRespuestaIA(data));
+    const mensajeRespuesta = construirMensajeRespuestaIA(data);
+    const resultadosIncluidos = accion === "listar_opciones"
+      ? Math.min(totalResultados, 10)
+      : 0;
+
+    console.warn("[FAMYBOT_IA_DEBUG] Respuesta IA construida:", {
+      intencion: intencion || null,
+      accion: accion || null,
+      total: totalResultados,
+      resultadosIncluidos,
+      longitudMensajeFinal: mensajeRespuesta.length
+    });
+
+    await enviarMensajeConMenuPrincipal(from, mensajeRespuesta);
   } catch (error) {
     console.error("[FAMYBOT_IA] Error consultando API:", construirDetalleErrorLog(error, {
       action: "famybot_ia_chat",
       messageId,
-      phone: from
+      phone: from,
+      elapsedMs: Date.now() - startedAt
     }));
     registrarEvento(from, "ai_response_error", {
       messageId,
@@ -6572,6 +6665,10 @@ async function manejarRespuestaIA(from, text, messageId) {
       from,
       "En este momento FamyBot IA no pudo procesar tu consulta. Puedes intentar nuevamente o volver al menú principal."
     );
+  } finally {
+    if (messageId) {
+      iaMensajesProcesando.delete(messageId);
+    }
   }
 }
 
@@ -8376,6 +8473,19 @@ function debeMostrarMenu(text) {
   return debeResetearConversacion(text);
 }
 
+function estaEnModoFamyBotIA(from) {
+  const sesion = sesionesFamyBotIA.get(from);
+  return Boolean(sesion && !sesionExpirada(sesion));
+}
+
+function esSalidaFamyBotIA(text, buttonId = "") {
+  if (buttonId === "main_menu") {
+    return true;
+  }
+
+  return ["menu", "menú", "menu principal", "menú principal", "inicio"].includes(text);
+}
+
 function debeResetearConversacion(text) {
   return ["hola", "menu", "menú", "menú principal", "menu principal", "inicio"].includes(text);
 }
@@ -8479,6 +8589,7 @@ async function expirarSesionUsuario(from) {
   }
 
   const sessionId = sesion.sessionId;
+  const teniaModoFamyBotIA = sesionesFamyBotIA.has(from);
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   eliminarSesionAgendamiento(from, sessionId);
@@ -8495,11 +8606,18 @@ async function expirarSesionUsuario(from) {
   }
 
   try {
-    await enviarMensajeTexto(
-      from,
-      "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
-    );
-    await enviarMenu(from, "principal");
+    if (teniaModoFamyBotIA) {
+      await enviarMensajeConMenuPrincipal(
+        from,
+        "La sesión con FamyBot IA finalizó por inactividad. Puedes volver al menú principal para iniciar nuevamente."
+      );
+    } else {
+      await enviarMensajeTexto(
+        from,
+        "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
+      );
+      await enviarMenu(from, "principal");
+    }
   } catch (error) {
     console.error("[SESION] Error enviando expiracion:", error.response?.data || error.message);
   }
@@ -8532,6 +8650,7 @@ function consumirSesionUsuarioExpirada(from) {
   }
 
   const sessionId = sesion.sessionId;
+  const teniaModoFamyBotIA = sesionesFamyBotIA.has(from);
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   eliminarSesionAgendamiento(from, sessionId);
@@ -8545,7 +8664,10 @@ function consumirSesionUsuarioExpirada(from) {
     registrarEvento(from, "session_expired", { sessionId });
   }
 
-  return true;
+  return {
+    expirada: true,
+    teniaModoFamyBotIA
+  };
 }
 
 function limpiarSesionesAgendamientoExpiradas() {
@@ -11734,7 +11856,21 @@ async function enviarImagenLocalWhatsApp(to, relativePath, caption) {
 }
 
 async function enviarMensajeConMenuPrincipal(to, message) {
-  await enviarBotones(to, message, [botonMenuPrincipal()]);
+  const texto = String(message || "");
+
+  if (texto.length <= 900) {
+    await enviarBotones(to, texto, [botonMenuPrincipal()]);
+    return;
+  }
+
+  const partes = dividirMensajePorLineas(texto, 900);
+  const ultimaParte = partes.pop() || "";
+
+  for (const parte of partes) {
+    await enviarMensajeTexto(to, parte);
+  }
+
+  await enviarBotones(to, ultimaParte, [botonMenuPrincipal()]);
 }
 
 async function enviarPromociones(to) {
