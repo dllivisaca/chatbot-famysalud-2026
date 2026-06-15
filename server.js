@@ -142,6 +142,7 @@ const sesionesProveedor = new Map();
 const sesionesAlianza = new Map();
 const sesionesFamyBotIA = new Map();
 const mensajesProcesados = new Map();
+const notificacionesAsesorPendientesPorWamid = new Map();
 const confirmacionesPayphoneProcesadas = new Map();
 const temporizadoresSesion = new Map();
 const sesionesExpiradas = new Set();
@@ -1052,6 +1053,7 @@ app.get("/test-template", async (req, res) => {
 
 // Recibe mensajes entrantes desde WhatsApp Cloud API.
 app.post("/webhook", async (req, res) => {
+  await registrarStatusesWhatsApp(req.body);
   const message = extraerMensaje(req.body);
 
   if (!message) {
@@ -2112,9 +2114,26 @@ async function notificarAsignacionAsesorConFallbackPlantilla(asesorId, sesionAse
   }
 
   if (resultadoTexto?.ok) {
+    const wamidTextoLibre = resultadoTexto?.wamid || resultadoTexto?.response?.data?.messages?.[0]?.id || null;
+
+    if (wamidTextoLibre) {
+      notificacionesAsesorPendientesPorWamid.set(wamidTextoLibre, {
+        asesorPhone,
+        asesorId,
+        paciente: sesionAsesor?.paciente || null,
+        origen: sesionAsesor?.origen || null,
+        mensajeInicialAsesor,
+        templateName: "nuevo_paciente_asesor",
+        languageCode: "es_EC",
+        creadoEn: Date.now()
+      });
+    }
+
     console.warn("[ASESOR_FALLBACK] Texto libre aceptado, no se enviará plantilla", {
       ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
-      responseStatus: resultadoTexto?.response?.status || null
+      responseStatus: resultadoTexto?.response?.status || null,
+      wamid: wamidTextoLibre,
+      pendienteStatusMeta: Boolean(wamidTextoLibre)
     });
     console.log("[ASESOR_DEBUG] Texto libre asesor enviado; no se usará plantilla", {
       ...obtenerContextoDebugAsesor(asesorId, sesionAsesor),
@@ -8584,6 +8603,142 @@ function extraerMensaje(body) {
   return body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 }
 
+function extraerStatusesWhatsApp(body) {
+  const statuses = [];
+
+  for (const entry of body?.entry || []) {
+    for (const change of entry?.changes || []) {
+      if (Array.isArray(change?.value?.statuses)) {
+        statuses.push(...change.value.statuses);
+      }
+    }
+  }
+
+  return statuses;
+}
+
+async function registrarStatusesWhatsApp(body) {
+  const statuses = extraerStatusesWhatsApp(body);
+
+  for (const status of statuses) {
+    console.warn("[WHATSAPP_STATUS_DEBUG] Status recibido de Meta:", {
+      id: status?.id || null,
+      recipient_id: status?.recipient_id || null,
+      status: status?.status || null,
+      timestamp: status?.timestamp || null,
+      errors: status?.errors || null
+    });
+
+    try {
+      await procesarStatusNotificacionAsesor(status);
+    } catch (error) {
+      console.error("[ASESOR_FALLBACK_STATUS] Error procesando status de asesor:", {
+        id: status?.id || null,
+        status: status?.status || null,
+        error: error?.response?.data || error?.message || error
+      });
+    }
+  }
+}
+
+async function procesarStatusNotificacionAsesor(status) {
+  const wamid = status?.id || null;
+
+  if (!wamid || !notificacionesAsesorPendientesPorWamid.has(wamid)) {
+    return;
+  }
+
+  const pendiente = notificacionesAsesorPendientesPorWamid.get(wamid);
+  const statusName = String(status?.status || "").toLowerCase();
+
+  if (["sent", "delivered", "read"].includes(statusName)) {
+    notificacionesAsesorPendientesPorWamid.delete(wamid);
+    console.warn("[ASESOR_FALLBACK_STATUS] Texto libre confirmado por status, se limpia pendiente", {
+      wamid,
+      status: statusName,
+      asesorId: pendiente.asesorId,
+      asesorPhone: pendiente.asesorPhone,
+      paciente: pendiente.paciente,
+      origen: pendiente.origen
+    });
+    return;
+  }
+
+  const esReengagement = statusName === "failed" && (status?.errors || []).some((error) => Number(error?.code) === 131047);
+
+  if (!esReengagement) {
+    return;
+  }
+
+  notificacionesAsesorPendientesPorWamid.delete(wamid);
+
+  const sesionAsesor = obtenerSesionAsesor(pendiente.asesorId);
+
+  if (!sesionAsesor || sesionAsesor.paciente !== pendiente.paciente) {
+    console.warn("[ASESOR_FALLBACK_STATUS] Texto libre falló por 131047, pendiente sin sesión vigente", {
+      wamid,
+      asesorId: pendiente.asesorId,
+      asesorPhone: pendiente.asesorPhone,
+      paciente: pendiente.paciente,
+      origen: pendiente.origen
+    });
+    return;
+  }
+
+  if (sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn) {
+    console.warn("[ASESOR_FALLBACK_STATUS] Texto libre falló por 131047, plantilla ya enviada; se evita duplicado", {
+      wamid,
+      asesorId: pendiente.asesorId,
+      asesorPhone: pendiente.asesorPhone,
+      paciente: pendiente.paciente,
+      origen: pendiente.origen,
+      plantillaNuevoPacienteAsesorEnviadaEn: sesionAsesor.plantillaNuevoPacienteAsesorEnviadaEn
+    });
+    return;
+  }
+
+  console.warn("[ASESOR_FALLBACK_STATUS] Texto libre falló por 131047, se enviará plantilla", {
+    wamid,
+    asesorId: pendiente.asesorId,
+    asesorPhone: pendiente.asesorPhone,
+    paciente: pendiente.paciente,
+    origen: pendiente.origen,
+    templateName: pendiente.templateName,
+    languageCode: pendiente.languageCode,
+    errors: status?.errors || null
+  });
+
+  marcarNotificacionInicialAsesorPendiente(pendiente.asesorId, sesionAsesor, pendiente.mensajeInicialAsesor);
+  const resultadoPlantilla = await enviarPlantillaWhatsAppConResultado(
+    pendiente.asesorPhone,
+    pendiente.templateName,
+    pendiente.languageCode
+  );
+
+  if (resultadoPlantilla?.ok) {
+    console.warn("[ASESOR_FALLBACK_STATUS] Plantilla enviada tras status failed", {
+      wamid,
+      asesorId: pendiente.asesorId,
+      asesorPhone: pendiente.asesorPhone,
+      paciente: pendiente.paciente,
+      origen: pendiente.origen,
+      templateName: pendiente.templateName,
+      languageCode: pendiente.languageCode,
+      responseStatus: resultadoPlantilla?.response?.status || null
+    });
+    return;
+  }
+
+  console.error("[ASESOR_FALLBACK_STATUS] Falló envío de plantilla tras status failed:", {
+    wamid,
+    asesorId: pendiente.asesorId,
+    asesorPhone: pendiente.asesorPhone,
+    paciente: pendiente.paciente,
+    origen: pendiente.origen,
+    error: resultadoPlantilla?.error?.response?.data || resultadoPlantilla?.error?.message || resultadoPlantilla?.error
+  });
+}
+
 function extraerTexto(message) {
   return message.text?.body?.trim().toLowerCase() || "";
 }
@@ -11725,6 +11880,13 @@ async function enviarMensajeTextoConResultado(to, message, options = {}) {
       };
     }
 
+    const wamid = response?.data?.messages?.[0]?.id || null;
+    console.warn("[WHATSAPP_TEXT_DEBUG] Texto aceptado por Meta:", {
+      to,
+      ...obtenerContextoDebugAsesorPorTelefono(to),
+      status: response.status,
+      wamid
+    });
     console.log("[WHATSAPP_TEXT] Despues await enviarWhatsApp estricto:", {
       to,
       length: String(message || "").length
@@ -11736,7 +11898,7 @@ async function enviarMensajeTextoConResultado(to, message, options = {}) {
       ventanaWhatsApp: "abierta_inferida_por_texto_aceptado",
       motivo: "meta_acepto_texto_libre"
     });
-    return { ok: true, response };
+    return { ok: true, response, wamid };
   } catch (error) {
     const detalle = error.response?.data || error.message;
     console.error("[WHATSAPP_TEXT] Error enviando texto estricto:", {
