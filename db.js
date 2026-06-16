@@ -126,6 +126,32 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
   );
 }
 
+async function insertarConsultaFamyBotIA(consulta) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  const createdAt = obtenerFechaHoraMysqlEcuador();
+
+  await ejecutarPoolConTimezone(
+    `INSERT INTO famybot_ia_consultas
+      (telefono, texto_usuario, intencion, confianza, accion, total_resultados, respuesta_resumen, message_id, session_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      consulta.telefono || null,
+      consulta.texto_usuario || "",
+      consulta.intencion || null,
+      consulta.confianza ?? null,
+      consulta.accion || null,
+      consulta.total_resultados ?? null,
+      consulta.respuesta_resumen || null,
+      consulta.message_id || null,
+      consulta.session_id || null,
+      createdAt
+    ]
+  );
+}
+
 function obtenerFechaHoraMysqlEcuador(fecha = new Date()) {
   const partes = new Intl.DateTimeFormat("en-CA", {
     timeZone: ECUADOR_TIMEZONE,
@@ -1007,6 +1033,7 @@ function columnaSessionIdNoExiste(error) {
 
 module.exports = {
   insertarEvento,
+  insertarConsultaFamyBotIA,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
   obtenerProfesionalesAgendablesPorServicio,

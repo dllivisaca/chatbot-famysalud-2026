@@ -11,6 +11,7 @@ const path = require("path");
 const nodemailer = require("nodemailer");
 const {
   insertarEvento,
+  insertarConsultaFamyBotIA,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
   obtenerProfesionalesAgendablesPorServicio,
@@ -6577,6 +6578,18 @@ function obtenerIntencionRespuestaIA(data) {
   return String(data?.intencion || data?.intent || "").trim();
 }
 
+function registrarConsultaFamyBotIANoBloqueante(consulta) {
+  insertarConsultaFamyBotIA({
+    ...consulta,
+    respuesta_resumen: String(consulta.respuesta_resumen || "").slice(0, 1000)
+  }).catch((error) => {
+    console.error("[FAMYBOT_IA_DB] Error registrando consulta", {
+      message: error?.message || String(error),
+      code: error?.code || null
+    });
+  });
+}
+
 function esRespuestaUbicacionIA(data) {
   const accion = obtenerAccionRespuestaIA(data).toLowerCase();
   const intencion = obtenerIntencionRespuestaIA(data).toLowerCase();
@@ -6594,6 +6607,20 @@ async function enviarBotonMenuFamyBotIA(to) {
     "Puedes volver al menú principal cuando desees.",
     [boton("main_menu", "🏠 Menú principal")]
   );
+}
+
+function obtenerRespuestaResumenEspecialIA(data) {
+  const accion = obtenerAccionRespuestaIA(data).toLowerCase();
+
+  if (accion === "abrir_trabajo") {
+    return TEXTOS.trabaja;
+  }
+
+  if (esRespuestaUbicacionIA(data)) {
+    return "Ubicación FamySALUD: Quisquis 1109 y José Mascote, Guayaquil, Ecuador. Incluye ubicación WhatsApp y croquis de referencia.";
+  }
+
+  return "";
 }
 
 async function manejarAccionEspecialRespuestaIA(from, data, messageId) {
@@ -6755,6 +6782,25 @@ async function manejarRespuestaIA(from, text, messageId) {
       }
     });
 
+    const consultaFamyBotIABase = {
+      telefono: from,
+      texto_usuario: text,
+      intencion,
+      confianza: data.confianza,
+      accion,
+      total_resultados: totalResultados,
+      message_id: messageId,
+      session_id: sessionIdIA
+    };
+    const respuestaResumenEspecialIA = obtenerRespuestaResumenEspecialIA(data);
+
+    if (respuestaResumenEspecialIA) {
+      registrarConsultaFamyBotIANoBloqueante({
+        ...consultaFamyBotIABase,
+        respuesta_resumen: respuestaResumenEspecialIA
+      });
+    }
+
     if (await manejarAccionEspecialRespuestaIA(from, data, messageId)) {
       console.warn("[FAMYBOT_IA_SEND] acción especial enviada", {
         messageId,
@@ -6765,6 +6811,11 @@ async function manejarRespuestaIA(from, text, messageId) {
     }
 
     const mensajeRespuesta = construirMensajeRespuestaIA(data);
+    registrarConsultaFamyBotIANoBloqueante({
+      ...consultaFamyBotIABase,
+      respuesta_resumen: mensajeRespuesta
+    });
+
     const resultadosIncluidos = accion === "listar_opciones" && Array.isArray(data.resultados)
       ? data.resultados.slice(0, 10).length
       : 0;
