@@ -6580,20 +6580,12 @@ function obtenerIntencionRespuestaIA(data) {
 function esRespuestaUbicacionIA(data) {
   const accion = obtenerAccionRespuestaIA(data).toLowerCase();
   const intencion = obtenerIntencionRespuestaIA(data).toLowerCase();
-  const mensaje = String(data?.mensaje || "").toLowerCase();
 
   if (["abrir_ubicacion", "mostrar_ubicacion", "ubicacion"].includes(accion)) {
     return true;
   }
 
-  return accion === "respuesta_simple" && (
-    intencion.includes("ubicacion")
-    || intencion.includes("ubicación")
-    || mensaje.includes("ubicacion")
-    || mensaje.includes("ubicación")
-    || mensaje.includes("quisquis")
-    || mensaje.includes("mascote")
-  );
+  return intencion === "consultar_ubicacion";
 }
 
 async function enviarBotonMenuFamyBotIA(to) {
