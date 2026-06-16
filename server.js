@@ -6535,6 +6535,10 @@ function construirMensajeRespuestaIA(data) {
   }
 
   if (accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
+    if (resultadosIncluidos.some((resultado) => tienePrecioServicioIA(resultado))) {
+      bloques.push("Los siguientes valores corresponden a pagos en efectivo o transferencia.");
+    }
+
     const opciones = resultadosIncluidos
       .map((resultado, index) => {
         const nombre = String(resultado?.nombre || resultado?.name || resultado?.title || `Opcion ${index + 1}`)
@@ -6542,7 +6546,7 @@ function construirMensajeRespuestaIA(data) {
           .trim();
         const precio = resultado?.precio ?? resultado?.price ?? resultado?.sale_price;
         const textoPrecio = precio !== undefined && precio !== null && String(precio).trim() !== ""
-          ? ` - ${formatearPrecio(precio)}`
+          ? ` - ${formatearPrecio(precio)} (efectivo o transferencia)`
           : "";
 
         return `${index + 1}. ${nombre}${textoPrecio}`;
@@ -6559,12 +6563,82 @@ function construirMensajeRespuestaIA(data) {
   return bloques.join("\n\n").trim() || "FamyBot IA procesó tu consulta, pero no devolvió un mensaje para mostrar.";
 }
 
+function tienePrecioServicioIA(resultado) {
+  const precio = resultado?.precio ?? resultado?.price ?? resultado?.sale_price;
+  return precio !== undefined && precio !== null && String(precio).trim() !== "";
+}
+
 function obtenerAccionRespuestaIA(data) {
   return String(data?.accion || data?.action || "").trim();
 }
 
 function obtenerIntencionRespuestaIA(data) {
   return String(data?.intencion || data?.intent || "").trim();
+}
+
+function esRespuestaUbicacionIA(data) {
+  const accion = obtenerAccionRespuestaIA(data).toLowerCase();
+  const intencion = obtenerIntencionRespuestaIA(data).toLowerCase();
+  const mensaje = String(data?.mensaje || "").toLowerCase();
+
+  if (["abrir_ubicacion", "mostrar_ubicacion", "ubicacion"].includes(accion)) {
+    return true;
+  }
+
+  return accion === "respuesta_simple" && (
+    intencion.includes("ubicacion")
+    || intencion.includes("ubicación")
+    || mensaje.includes("ubicacion")
+    || mensaje.includes("ubicación")
+    || mensaje.includes("quisquis")
+    || mensaje.includes("mascote")
+  );
+}
+
+async function enviarBotonMenuFamyBotIA(to) {
+  await enviarBotones(
+    to,
+    "Puedes volver al menú principal cuando desees.",
+    [boton("main_menu", "🏠 Menú principal")]
+  );
+}
+
+async function manejarAccionEspecialRespuestaIA(from, data, messageId) {
+  const accion = obtenerAccionRespuestaIA(data).toLowerCase();
+
+  if (accion === "abrir_trabajo") {
+    registrarEvento(from, "work_with_us_opened", {
+      messageId,
+      buttonId: "main_trabaja",
+      flowKey: "trabaja_con_nosotros",
+      payload: {
+        flowKey: "trabaja_con_nosotros",
+        source: "famybot_ia"
+      }
+    });
+
+    await enviarMensajeTexto(from, TEXTOS.trabaja);
+    await enviarBotonMenuFamyBotIA(from);
+    return true;
+  }
+
+  if (esRespuestaUbicacionIA(data)) {
+    await enviarUbicacionFamysaludContenido(
+      from,
+      `📍 ¡Será un gusto recibirte en FamySALUD!
+
+Nos encontramos ubicados en:
+
+Quisquis 1109 y José Mascote
+Guayaquil, Ecuador
+
+Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
+    );
+    await enviarBotonMenuFamyBotIA(from);
+    return true;
+  }
+
+  return false;
 }
 
 async function manejarRespuestaIA(from, text, messageId) {
@@ -6660,6 +6734,15 @@ async function manejarRespuestaIA(from, text, messageId) {
       }
     });
 
+    if (await manejarAccionEspecialRespuestaIA(from, data, messageId)) {
+      console.warn("[FAMYBOT_IA_SEND] acción especial enviada", {
+        messageId,
+        from,
+        accion: accion || null
+      });
+      return;
+    }
+
     const mensajeRespuesta = construirMensajeRespuestaIA(data);
     const resultadosIncluidos = accion === "listar_opciones" && Array.isArray(data.resultados)
       ? data.resultados.slice(0, 10).length
@@ -6689,11 +6772,7 @@ async function manejarRespuestaIA(from, text, messageId) {
       longitudMensajeRespuesta: mensajeRespuesta.length
     });
 
-    await enviarBotones(
-      from,
-      "Puedes volver al menú principal cuando desees.",
-      [boton("main_menu", "🏠 Menú principal")]
-    );
+    await enviarBotonMenuFamyBotIA(from);
     console.warn("[FAMYBOT_IA_SEND] botón menú enviado", {
       messageId,
       from,
@@ -11992,10 +12071,14 @@ Guayaquil, Ecuador`
 }
 
 async function enviarUbicacionFamysalud(to, mensajeInicial) {
+  await enviarUbicacionFamysaludContenido(to, mensajeInicial);
+  await enviarBotones(to, "¿Necesitas algo más? Puedes volver al menú principal.", [botonMenuPrincipal()]);
+}
+
+async function enviarUbicacionFamysaludContenido(to, mensajeInicial) {
   await enviarMensajeTexto(to, mensajeInicial);
   await enviarUbicacionWhatsApp(to, UBICACION_FAMYSALUD);
   await enviarImagenLocalWhatsApp(to, UBICACION_FAMYSALUD.croquisPath, "🗺️ Croquis de referencia");
-  await enviarBotones(to, "¿Necesitas algo más? Puedes volver al menú principal.", [botonMenuPrincipal()]);
 }
 
 async function enviarDetalleServicioConOpciones(to, message) {
