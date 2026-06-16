@@ -1120,6 +1120,18 @@ app.post("/webhook", async (req, res) => {
 
     const teniaSesionActiva = sesionUsuarioActiva(from);
     const teniaSessionId = Boolean(obtenerSessionId(from));
+    const sesionFamyBotIARouter = sesionesFamyBotIA.get(from) || null;
+    const sesionFamyBotIAExpirada = sesionFamyBotIARouter
+      ? sesionExpirada(sesionFamyBotIARouter)
+      : false;
+
+    console.warn("[FAMYBOT_IA_ROUTER]", {
+      from,
+      text,
+      modoFamyBotIA: estaEnModoFamyBotIA(from),
+      tieneSesionFamyBotIA: Boolean(sesionFamyBotIARouter),
+      expirada: sesionFamyBotIAExpirada
+    });
 
     if (!buttonId && !listReplyId && estaEnModoFamyBotIA(from) && puedeProbarFamyBotIA(from)) {
       if (esSalidaFamyBotIA(text, buttonId)) {
@@ -6509,18 +6521,20 @@ function construirMensajeRespuestaIA(data) {
   const bloques = [];
   const mensaje = String(data?.mensaje || "").trim();
   const accion = obtenerAccionRespuestaIA(data);
+  const resultadosIncluidos = accion === "listar_opciones" && Array.isArray(data.resultados)
+    ? data.resultados.slice(0, 10)
+    : [];
   const totalResultados = accion === "listar_opciones" && Array.isArray(data.resultados)
-    ? data.resultados.length
+    ? data.total_real ?? data.total ?? data.resultados.length
     : 0;
 
-  if (totalResultados > 10) {
-    bloques.push(`Encontré ${totalResultados} opciones relacionadas con tu consulta. Te muestro las primeras 10. Puedes responder con el nombre del servicio que deseas consultar.`);
+  if (totalResultados > resultadosIncluidos.length) {
+    bloques.push(`Encontré ${totalResultados} opciones relacionadas con tu consulta. Te muestro las primeras 10... Puedes responder con el nombre del servicio que deseas consultar.`);
   } else if (mensaje) {
     bloques.push(mensaje);
   }
 
   if (accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
-    const resultadosIncluidos = data.resultados.slice(0, 10);
     const opciones = resultadosIncluidos
       .map((resultado, index) => {
         const nombre = String(resultado?.nombre || resultado?.name || resultado?.title || `Opcion ${index + 1}`)
@@ -6588,11 +6602,6 @@ async function manejarRespuestaIA(from, text, messageId) {
   const startedAt = Date.now();
 
   try {
-    sesionesFamyBotIA.set(from, {
-      timestamp: Date.now(),
-      sessionId: obtenerSessionId(from)
-    });
-
     console.warn("[FAMYBOT_IA] Consultando API:", {
       messageId,
       from,
@@ -6613,9 +6622,24 @@ async function manejarRespuestaIA(from, text, messageId) {
     );
 
     const data = apiResponse.data || {};
-    const totalResultados = Array.isArray(data.resultados) ? data.resultados.length : 0;
+    const totalResultados = Array.isArray(data.resultados)
+      ? data.total_real ?? data.total ?? data.resultados.length
+      : 0;
     const accion = obtenerAccionRespuestaIA(data);
     const intencion = obtenerIntencionRespuestaIA(data);
+    const timestampSesionIA = Date.now();
+    const sessionIdIA = obtenerSessionId(from);
+
+    sesionesFamyBotIA.set(from, {
+      timestamp: timestampSesionIA,
+      sessionId: sessionIdIA
+    });
+
+    console.warn("[FAMYBOT_IA_SESSION] sesión IA refrescada", {
+      from,
+      sessionId: sessionIdIA,
+      timestamp: timestampSesionIA
+    });
 
     console.warn("[FAMYBOT_IA] API respondió:", {
       messageId,
@@ -6637,9 +6661,16 @@ async function manejarRespuestaIA(from, text, messageId) {
     });
 
     const mensajeRespuesta = construirMensajeRespuestaIA(data);
-    const resultadosIncluidos = accion === "listar_opciones"
-      ? Math.min(totalResultados, 10)
+    const resultadosIncluidos = accion === "listar_opciones" && Array.isArray(data.resultados)
+      ? data.resultados.slice(0, 10).length
       : 0;
+
+    console.warn("[FAMYBOT_IA] Conteo API:", {
+      totalApi: data.total,
+      totalRealApi: data.total_real,
+      resultadosLength: Array.isArray(data.resultados) ? data.resultados.length : 0,
+      resultadosIncluidos
+    });
 
     console.warn("[FAMYBOT_IA_DEBUG] Respuesta IA construida:", {
       intencion: intencion || null,
