@@ -61,6 +61,7 @@ const FAMYBOT_IA_ALLOWED_PHONES = (process.env.FAMYBOT_IA_ALLOWED_PHONES || "099
   .filter(Boolean);
 const ENABLE_AI_RESPONSES = flagActiva(process.env.ENABLE_AI_RESPONSES);
 const FAMYBOT_IA_API_URL = process.env.FAMYBOT_IA_API_URL || "";
+const FAMYBOT_IA_API_KEY = process.env.FAMYBOT_IA_API_KEY || "";
 const FAMYBOT_IA_API_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.FAMYBOT_IA_API_TIMEOUT_MS || "15000", 10);
 const FAMYBOT_IA_API_TIMEOUT_MS = Number.isInteger(FAMYBOT_IA_API_TIMEOUT_MS_CONFIG) && FAMYBOT_IA_API_TIMEOUT_MS_CONFIG > 0
   ? FAMYBOT_IA_API_TIMEOUT_MS_CONFIG
@@ -6661,6 +6662,31 @@ async function manejarRespuestaIA(from, text, messageId) {
     return;
   }
 
+  const famyBotIAApiKeyConfigurada = Boolean(FAMYBOT_IA_API_KEY.trim());
+  console.warn("[FAMYBOT_IA] API key configurada:", famyBotIAApiKeyConfigurada);
+
+  if (!famyBotIAApiKeyConfigurada) {
+    console.warn("[FAMYBOT_IA] API key no configurada", {
+      messageId,
+      from
+    });
+    registrarEvento(from, "invalid_message", {
+      messageId,
+      payload: {
+        reason: "ai_api_key_not_configured",
+        aiEnabled: featureHabilitada(ENABLE_AI_RESPONSES),
+        allowed: puedeProbarFamyBotIA(from),
+        modeActive: modoIAActivo,
+        apiConfigured: Boolean(FAMYBOT_IA_API_URL.trim()),
+        apiKeyConfigured: false,
+        textLength: text.length
+      }
+    });
+
+    await enviarMensajeConMenuPrincipal(from, "FamyBot IA no está disponible en este momento.");
+    return;
+  }
+
   if (messageId && iaMensajesProcesando.has(messageId)) {
     console.warn("[FAMYBOT_IA] Mensaje IA duplicado en proceso; se omite llamada concurrente:", {
       messageId,
@@ -6691,7 +6717,10 @@ async function manejarRespuestaIA(from, text, messageId) {
         sessionId: obtenerSessionId(from)
       },
       {
-        timeout: FAMYBOT_IA_API_TIMEOUT_MS
+        timeout: FAMYBOT_IA_API_TIMEOUT_MS,
+        headers: {
+          "X-FamyBot-IA-Key": FAMYBOT_IA_API_KEY
+        }
       }
     );
 
