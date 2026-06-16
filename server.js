@@ -6509,13 +6509,17 @@ function construirMensajeRespuestaIA(data) {
   const bloques = [];
   const mensaje = String(data?.mensaje || "").trim();
   const accion = obtenerAccionRespuestaIA(data);
+  const totalResultados = accion === "listar_opciones" && Array.isArray(data.resultados)
+    ? data.resultados.length
+    : 0;
 
-  if (mensaje) {
+  if (totalResultados > 10) {
+    bloques.push(`Encontré ${totalResultados} opciones relacionadas con tu consulta. Te muestro las primeras 10. Puedes responder con el nombre del servicio que deseas consultar.`);
+  } else if (mensaje) {
     bloques.push(mensaje);
   }
 
   if (accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
-    const totalResultados = data.resultados.length;
     const resultadosIncluidos = data.resultados.slice(0, 10);
     const opciones = resultadosIncluidos
       .map((resultado, index) => {
@@ -6645,7 +6649,27 @@ async function manejarRespuestaIA(from, text, messageId) {
       longitudMensajeFinal: mensajeRespuesta.length
     });
 
-    await enviarMensajeConMenuPrincipal(from, mensajeRespuesta);
+    await enviarMensajeTexto(from, mensajeRespuesta);
+    console.warn("[FAMYBOT_IA_SEND] texto simple enviado", {
+      messageId,
+      from,
+      totalResultados,
+      resultadosIncluidos,
+      longitudMensajeRespuesta: mensajeRespuesta.length
+    });
+
+    await enviarBotones(
+      from,
+      "Puedes volver al menú principal cuando desees.",
+      [boton("main_menu", "🏠 Menú principal")]
+    );
+    console.warn("[FAMYBOT_IA_SEND] botón menú enviado", {
+      messageId,
+      from,
+      totalResultados,
+      resultadosIncluidos,
+      longitudMensajeRespuesta: mensajeRespuesta.length
+    });
   } catch (error) {
     console.error("[FAMYBOT_IA] Error consultando API:", construirDetalleErrorLog(error, {
       action: "famybot_ia_chat",
