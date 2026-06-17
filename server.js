@@ -6601,6 +6601,10 @@ function esRespuestaUbicacionIA(data) {
   return intencion === "consultar_ubicacion";
 }
 
+function esRespuestaConsultaUbicacionIA(data) {
+  return obtenerAccionRespuestaIA(data).toLowerCase() === "consulta_ubicacion";
+}
+
 async function enviarBotonMenuFamyBotIA(to) {
   await enviarBotones(
     to,
@@ -6614,6 +6618,12 @@ function obtenerRespuestaResumenEspecialIA(data) {
 
   if (accion === "abrir_trabajo") {
     return TEXTOS.trabaja;
+  }
+
+  if (esRespuestaConsultaUbicacionIA(data)) {
+    const mensaje = String(data?.mensaje || "").trim();
+    const textoConsulta = mensaje || "Para indicarte el valor exacto de la consulta, por favor dime la especialidad o área que necesitas. Como referencia, la consulta de Medicina General tiene un valor de $15 en efectivo o transferencia.";
+    return `${textoConsulta}\n\nUbicación FamySALUD: Quisquis 1109 y José Mascote, Guayaquil, Ecuador. Incluye ubicación WhatsApp y croquis de referencia.`;
   }
 
   if (esRespuestaUbicacionIA(data)) {
@@ -6652,6 +6662,27 @@ async function manejarAccionEspecialRespuestaIA(from, data, messageId) {
     });
 
     await enviarMensajeTexto(from, TEXTOS.trabaja);
+    await enviarBotonMenuFamyBotIA(from);
+    return true;
+  }
+
+  if (esRespuestaConsultaUbicacionIA(data)) {
+    const mensaje = String(data?.mensaje || "").trim();
+    await enviarMensajeTexto(
+      from,
+      mensaje || "Para indicarte el valor exacto de la consulta, por favor dime la especialidad o área que necesitas. Como referencia, la consulta de Medicina General tiene un valor de $15 en efectivo o transferencia."
+    );
+    await enviarUbicacionFamysaludContenido(
+      from,
+      `📍 ¡Será un gusto recibirte en FamySALUD!
+
+Nos encontramos ubicados en:
+
+Quisquis 1109 y José Mascote
+Guayaquil, Ecuador
+
+Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
+    );
     await enviarBotonMenuFamyBotIA(from);
     return true;
   }
