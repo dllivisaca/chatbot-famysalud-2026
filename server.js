@@ -6623,6 +6623,20 @@ function obtenerRespuestaResumenEspecialIA(data) {
   return "";
 }
 
+function obtenerButtonIdAccionEspecialIA(data) {
+  const accion = obtenerAccionRespuestaIA(data).toLowerCase();
+  const accionesEspeciales = {
+    iniciar_agendamiento: "paciente_agendar_cita",
+    solicitar_resultados: "paciente_resultados",
+    abrir_proveedores: "main_proveedores",
+    abrir_alianzas: "main_alianzas",
+    mostrar_promociones: "paciente_promociones",
+    derivar_asesor: "paciente_hablar_asesor"
+  };
+
+  return accionesEspeciales[accion] || "";
+}
+
 async function manejarAccionEspecialRespuestaIA(from, data, messageId) {
   const accion = obtenerAccionRespuestaIA(data).toLowerCase();
 
@@ -6655,6 +6669,20 @@ Guayaquil, Ecuador
 Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
     );
     await enviarBotonMenuFamyBotIA(from);
+    return true;
+  }
+
+  const buttonId = obtenerButtonIdAccionEspecialIA(data);
+
+  if (buttonId) {
+    console.warn("[FAMYBOT_IA_ACTION] activando flujo real", {
+      from,
+      messageId,
+      accion,
+      buttonId
+    });
+
+    await manejarBoton(from, buttonId, messageId);
     return true;
   }
 
