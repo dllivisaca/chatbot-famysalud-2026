@@ -152,6 +152,37 @@ async function insertarConsultaFamyBotIA(consulta) {
   );
 }
 
+async function registrarDiagnosticoIA(diagnostico) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  const createdAt = obtenerFechaHoraMysqlEcuador();
+  const serviciosDetectados = diagnostico.serviciosDetectados !== undefined && diagnostico.serviciosDetectados !== null
+    ? JSON.stringify(diagnostico.serviciosDetectados)
+    : null;
+
+  await ejecutarPoolConTimezone(
+    `INSERT INTO famybot_ia_diagnostics
+      (phone, texto_usuario, intencion, confianza, modelo_version, search_mode, servicios_detectados, accion, respuesta_generada, processing_time_ms, error_message, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      diagnostico.phone || null,
+      diagnostico.textoUsuario || "",
+      diagnostico.intencion || null,
+      diagnostico.confianza ?? null,
+      diagnostico.modeloVersion || null,
+      diagnostico.searchMode || null,
+      serviciosDetectados,
+      diagnostico.accion || null,
+      diagnostico.respuestaGenerada || null,
+      diagnostico.processingTimeMs ?? null,
+      diagnostico.errorMessage || null,
+      createdAt
+    ]
+  );
+}
+
 function obtenerFechaHoraMysqlEcuador(fecha = new Date()) {
   const partes = new Intl.DateTimeFormat("en-CA", {
     timeZone: ECUADOR_TIMEZONE,
@@ -1034,6 +1065,7 @@ function columnaSessionIdNoExiste(error) {
 module.exports = {
   insertarEvento,
   insertarConsultaFamyBotIA,
+  registrarDiagnosticoIA,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
   obtenerProfesionalesAgendablesPorServicio,

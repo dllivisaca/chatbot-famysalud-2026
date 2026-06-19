@@ -12,6 +12,7 @@ const nodemailer = require("nodemailer");
 const {
   insertarEvento,
   insertarConsultaFamyBotIA,
+  registrarDiagnosticoIA,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
   obtenerProfesionalesAgendablesPorServicio,
@@ -6590,6 +6591,73 @@ function registrarConsultaFamyBotIANoBloqueante(consulta) {
   });
 }
 
+function extraerModeloVersionRespuestaIA(data) {
+  const modeloVersion = data?.modelo_version
+    ?? data?.modeloVersion
+    ?? data?.model_version
+    ?? data?.modelVersion
+    ?? data?.version_modelo
+    ?? data?.versionModelo
+    ?? data?.modelo
+    ?? data?.model;
+
+  return modeloVersion !== undefined && modeloVersion !== null
+    ? String(modeloVersion).trim()
+    : "";
+}
+
+function extraerSearchModeRespuestaIA(data) {
+  const searchMode = data?.search_mode
+    ?? data?.searchMode
+    ?? data?.modo_busqueda
+    ?? data?.modoBusqueda
+    ?? data?.busqueda?.mode
+    ?? data?.busqueda?.modo
+    ?? data?.search?.mode;
+  const normalizado = searchMode !== undefined && searchMode !== null
+    ? String(searchMode).trim().toLowerCase()
+    : "";
+
+  if (["semantic", "fuzzy", "semantic_fallback", "none"].includes(normalizado)) {
+    return normalizado;
+  }
+
+  return "";
+}
+
+function extraerServiciosDetectadosRespuestaIA(data) {
+  if (Array.isArray(data?.servicios_detectados)) {
+    return data.servicios_detectados;
+  }
+
+  if (Array.isArray(data?.serviciosDetectados)) {
+    return data.serviciosDetectados;
+  }
+
+  if (Array.isArray(data?.resultados)) {
+    return data.resultados;
+  }
+
+  return null;
+}
+
+function registrarDiagnosticoIANoBloqueante(diagnostico) {
+  registrarDiagnosticoIA({
+    ...diagnostico,
+    respuestaGenerada: diagnostico.respuestaGenerada
+      ? String(diagnostico.respuestaGenerada).slice(0, 4000)
+      : null,
+    errorMessage: diagnostico.errorMessage
+      ? String(diagnostico.errorMessage).slice(0, 1000)
+      : null
+  }).catch((error) => {
+    console.error("[FAMYBOT_IA_DIAGNOSTICS_DB] Error registrando diagnostico IA", construirDetalleErrorLog(error, {
+      action: "insert_famybot_ia_diagnostics",
+      phone: diagnostico.phone || null
+    }));
+  });
+}
+
 function esRespuestaUbicacionIA(data) {
   const accion = obtenerAccionRespuestaIA(data).toLowerCase();
   const intencion = obtenerIntencionRespuestaIA(data).toLowerCase();
@@ -6778,6 +6846,8 @@ async function manejarRespuestaIA(from, text, messageId) {
   }
 
   const startedAt = Date.now();
+  let iaCallStartedAt = null;
+  let iaCallEndedAt = null;
 
   try {
     console.warn("[FAMYBOT_IA] Consultando API:", {
@@ -6786,6 +6856,7 @@ async function manejarRespuestaIA(from, text, messageId) {
       url: sanearUrlParaLog(FAMYBOT_IA_API_URL)
     });
 
+    iaCallStartedAt = Date.now();
     const apiResponse = await axios.post(
       FAMYBOT_IA_API_URL,
       {
@@ -6801,6 +6872,7 @@ async function manejarRespuestaIA(from, text, messageId) {
         }
       }
     );
+    iaCallEndedAt = Date.now();
 
     const data = apiResponse.data || {};
     const totalResultados = Array.isArray(data.resultados)
@@ -6852,6 +6924,19 @@ async function manejarRespuestaIA(from, text, messageId) {
       session_id: sessionIdIA
     };
     const respuestaResumenEspecialIA = obtenerRespuestaResumenEspecialIA(data);
+    registrarDiagnosticoIANoBloqueante({
+      phone: from,
+      textoUsuario: text,
+      intencion,
+      confianza: data.confianza,
+      modeloVersion: extraerModeloVersionRespuestaIA(data),
+      searchMode: extraerSearchModeRespuestaIA(data),
+      serviciosDetectados: extraerServiciosDetectadosRespuestaIA(data),
+      accion,
+      respuestaGenerada: respuestaResumenEspecialIA || construirMensajeRespuestaIA(data),
+      processingTimeMs: iaCallEndedAt - iaCallStartedAt,
+      errorMessage: null
+    });
 
     if (respuestaResumenEspecialIA) {
       registrarConsultaFamyBotIANoBloqueante({
@@ -6912,6 +6997,22 @@ async function manejarRespuestaIA(from, text, messageId) {
       longitudMensajeRespuesta: mensajeRespuesta.length
     });
   } catch (error) {
+    if (iaCallStartedAt && !iaCallEndedAt) {
+      iaCallEndedAt = Date.now();
+      registrarDiagnosticoIANoBloqueante({
+        phone: from,
+        textoUsuario: text,
+        intencion: null,
+        confianza: null,
+        modeloVersion: null,
+        searchMode: null,
+        serviciosDetectados: null,
+        accion: null,
+        respuestaGenerada: null,
+        processingTimeMs: iaCallEndedAt - iaCallStartedAt,
+        errorMessage: error?.message || String(error)
+      });
+    }
     console.error("[FAMYBOT_IA] Error consultando API:", construirDetalleErrorLog(error, {
       action: "famybot_ia_chat",
       messageId,
