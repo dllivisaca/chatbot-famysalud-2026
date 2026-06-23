@@ -13,6 +13,7 @@ const {
   insertarEvento,
   insertarConsultaFamyBotIA,
   registrarDiagnosticoIA,
+  insertarTrackingFamyBotIA,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
   obtenerProfesionalesAgendablesPorServicio,
@@ -6672,6 +6673,105 @@ function registrarDiagnosticoIANoBloqueante(diagnostico) {
   });
 }
 
+function truncarTextoTrackingIA(valor, maxLength) {
+  if (valor === undefined || valor === null) {
+    return null;
+  }
+
+  return String(valor).slice(0, maxLength);
+}
+
+function extraerIntencionesDetectadasRespuestaIA(data) {
+  const intenciones = data?.intenciones_detectadas
+    ?? data?.intencionesDetectadas
+    ?? data?.detected_intents
+    ?? data?.detectedIntents
+    ?? data?.intents;
+
+  return intenciones !== undefined && intenciones !== null ? intenciones : null;
+}
+
+function extraerAppCodeVersionRespuestaIA(data) {
+  const appCodeVersion = data?.app_code_version
+    ?? data?.appCodeVersion
+    ?? data?.code_version
+    ?? data?.codeVersion
+    ?? data?.app_version
+    ?? data?.appVersion
+    ?? process.env.APP_CODE_VERSION
+    ?? process.env.npm_package_version;
+
+  return appCodeVersion !== undefined && appCodeVersion !== null
+    ? String(appCodeVersion).trim()
+    : "";
+}
+
+function extraerSinResultadosCatalogoRespuestaIA(data, totalResultados) {
+  const valorApi = data?.sin_resultados_catalogo
+    ?? data?.sinResultadosCatalogo
+    ?? data?.no_catalog_results
+    ?? data?.noCatalogResults;
+
+  if (typeof valorApi === "boolean") {
+    return valorApi;
+  }
+
+  if (typeof valorApi === "number") {
+    return valorApi === 1;
+  }
+
+  if (typeof valorApi === "string" && valorApi.trim()) {
+    return ["1", "true", "si", "sí", "yes"].includes(valorApi.trim().toLowerCase());
+  }
+
+  return Array.isArray(data?.resultados) && Number(totalResultados) === 0;
+}
+
+function registrarTrackingIANoBloqueante(tracking) {
+  insertarTrackingFamyBotIA({
+    ...tracking,
+    mensaje_usuario: truncarTextoTrackingIA(tracking.mensaje_usuario, 4000) || "",
+    respuesta_ia: truncarTextoTrackingIA(tracking.respuesta_ia, 8000),
+    error_api_ia: truncarTextoTrackingIA(tracking.error_api_ia, 1000)
+  }).catch((error) => {
+    console.error("[FAMYBOT_IA_TRACKING_DB] Error registrando tracking IA", construirDetalleErrorLog(error, {
+      action: "insert_famybot_ia_tracking",
+      messageId: tracking.message_id || null,
+      phone: tracking.phone || tracking.wa_id || null
+    }));
+  });
+}
+
+function construirTrackingRespuestaIA({ from, text, messageId, sessionId, data, respuestaIA, processingTimeMs, errorApiIA = null }) {
+  const accion = obtenerAccionRespuestaIA(data);
+  const totalResultados = Array.isArray(data?.resultados)
+    ? data.total_real ?? data.total ?? data.resultados.length
+    : null;
+
+  return {
+    wa_id: from,
+    phone: from,
+    message_id: messageId || null,
+    session_id: sessionId || null,
+    mensaje_usuario: text || "",
+    intencion: obtenerIntencionRespuestaIA(data) || null,
+    intenciones_detectadas: extraerIntencionesDetectadasRespuestaIA(data),
+    accion: accion || null,
+    respuesta_ia: respuestaIA || null,
+    incluir_botones_ubicacion: debeIncluirBotonesUbicacionIA(data) ? 1 : 0,
+    total_resultados_catalogo: totalResultados,
+    search_mode: extraerSearchModeRespuestaIA(data) || null,
+    servicios_encontrados: extraerServiciosDetectadosRespuestaIA(data),
+    sin_resultados_catalogo: extraerSinResultadosCatalogoRespuestaIA(data, totalResultados) ? 1 : 0,
+    derivado_asesor: accion.toLowerCase() === "derivar_asesor" ? 1 : 0,
+    origen: "famybot_ia",
+    model_version: extraerModeloVersionRespuestaIA(data) || null,
+    app_code_version: extraerAppCodeVersionRespuestaIA(data) || null,
+    error_api_ia: errorApiIA || null,
+    tiempo_respuesta_ms: processingTimeMs ?? null
+  };
+}
+
 function esRespuestaUbicacionIA(data) {
   const accion = obtenerAccionRespuestaIA(data).toLowerCase();
   const intencion = obtenerIntencionRespuestaIA(data).toLowerCase();
@@ -6688,7 +6788,9 @@ function esRespuestaConsultaUbicacionIA(data) {
 }
 
 function debeIncluirBotonesUbicacionIA(data) {
-  return data?.incluir_botones_ubicacion === true;
+  return data?.incluir_botones_ubicacion === true
+    || esRespuestaConsultaUbicacionIA(data)
+    || esRespuestaUbicacionIA(data);
 }
 
 function botonesUbicacionFamyBotIA() {
@@ -6711,7 +6813,7 @@ async function enviarCierreRespuestaFamyBotIA(to, data) {
   if (debeIncluirBotonesUbicacionIA(data)) {
     await enviarBotones(
       to,
-      "Puedes abrir la ubicación en Google Maps, ver el croquis o volver al menú principal.",
+      "Elige una opción:",
       botonesUbicacionFamyBotIA()
     );
     return "botones_ubicacion";
@@ -6723,6 +6825,9 @@ async function enviarCierreRespuestaFamyBotIA(to, data) {
 
 function obtenerRespuestaResumenEspecialIA(data) {
   const accion = obtenerAccionRespuestaIA(data).toLowerCase();
+  const textoUbicacion = `Estamos ubicados en Quisquís 1109 y José Mascote, Guayaquil.
+
+Si lo prefieres, puedes usar los botones para abrir la ubicación en Google Maps o ver el croquis de referencia.`;
 
   if (accion === "abrir_trabajo") {
     return TEXTOS.trabaja;
@@ -6731,11 +6836,11 @@ function obtenerRespuestaResumenEspecialIA(data) {
   if (esRespuestaConsultaUbicacionIA(data)) {
     const mensaje = String(data?.mensaje || "").trim();
     const textoConsulta = mensaje || "Para indicarte el valor exacto de la consulta, por favor dime la especialidad o área que necesitas. Como referencia, la consulta de Medicina General tiene un valor de $15 en efectivo o transferencia.";
-    return `${textoConsulta}\n\nUbicación FamySALUD: Quisquis 1109 y José Mascote, Guayaquil, Ecuador. Incluye ubicación WhatsApp y croquis de referencia.`;
+    return `${textoConsulta}\n\n${textoUbicacion}`;
   }
 
   if (esRespuestaUbicacionIA(data)) {
-    return "Ubicación FamySALUD: Quisquis 1109 y José Mascote, Guayaquil, Ecuador. Incluye ubicación WhatsApp y croquis de referencia.";
+    return textoUbicacion;
   }
 
   return "";
@@ -6774,45 +6879,8 @@ async function manejarAccionEspecialRespuestaIA(from, data, messageId) {
     return true;
   }
 
-  if (debeIncluirBotonesUbicacionIA(data) && (esRespuestaConsultaUbicacionIA(data) || esRespuestaUbicacionIA(data))) {
+  if (esRespuestaConsultaUbicacionIA(data) || esRespuestaUbicacionIA(data)) {
     return false;
-  }
-
-  if (esRespuestaConsultaUbicacionIA(data)) {
-    const mensaje = String(data?.mensaje || "").trim();
-    await enviarMensajeTexto(
-      from,
-      mensaje || "Para indicarte el valor exacto de la consulta, por favor dime la especialidad o área que necesitas. Como referencia, la consulta de Medicina General tiene un valor de $15 en efectivo o transferencia."
-    );
-    await enviarUbicacionFamysaludContenido(
-      from,
-      `📍 ¡Será un gusto recibirte en FamySALUD!
-
-Nos encontramos ubicados en:
-
-Quisquis 1109 y José Mascote
-Guayaquil, Ecuador
-
-Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
-    );
-    await enviarCierreRespuestaFamyBotIA(from, data);
-    return true;
-  }
-
-  if (esRespuestaUbicacionIA(data)) {
-    await enviarUbicacionFamysaludContenido(
-      from,
-      `📍 ¡Será un gusto recibirte en FamySALUD!
-
-Nos encontramos ubicados en:
-
-Quisquis 1109 y José Mascote
-Guayaquil, Ecuador
-
-Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
-    );
-    await enviarCierreRespuestaFamyBotIA(from, data);
-    return true;
   }
 
   const buttonId = obtenerButtonIdAccionEspecialIA(data);
@@ -6968,6 +7036,7 @@ async function manejarRespuestaIA(from, text, messageId) {
       session_id: sessionIdIA
     };
     const respuestaResumenEspecialIA = obtenerRespuestaResumenEspecialIA(data);
+    const respuestaIAFinal = respuestaResumenEspecialIA || construirMensajeRespuestaIA(data);
     registrarDiagnosticoIANoBloqueante({
       phone: from,
       textoUsuario: text,
@@ -6977,10 +7046,19 @@ async function manejarRespuestaIA(from, text, messageId) {
       searchMode: extraerSearchModeRespuestaIA(data),
       serviciosDetectados: extraerServiciosDetectadosRespuestaIA(data),
       accion,
-      respuestaGenerada: respuestaResumenEspecialIA || construirMensajeRespuestaIA(data),
+      respuestaGenerada: respuestaIAFinal,
       processingTimeMs: iaCallEndedAt - iaCallStartedAt,
       errorMessage: null
     });
+    registrarTrackingIANoBloqueante(construirTrackingRespuestaIA({
+      from,
+      text,
+      messageId,
+      sessionId: sessionIdIA,
+      data,
+      respuestaIA: respuestaIAFinal,
+      processingTimeMs: iaCallEndedAt - iaCallStartedAt
+    }));
 
     if (respuestaResumenEspecialIA) {
       registrarConsultaFamyBotIANoBloqueante({
@@ -6998,7 +7076,7 @@ async function manejarRespuestaIA(from, text, messageId) {
       return;
     }
 
-    const mensajeRespuesta = construirMensajeRespuestaIA(data);
+    const mensajeRespuesta = respuestaIAFinal;
     registrarConsultaFamyBotIANoBloqueante({
       ...consultaFamyBotIABase,
       respuesta_resumen: mensajeRespuesta
@@ -7057,6 +7135,16 @@ async function manejarRespuestaIA(from, text, messageId) {
         processingTimeMs: iaCallEndedAt - iaCallStartedAt,
         errorMessage: error?.message || String(error)
       });
+      registrarTrackingIANoBloqueante(construirTrackingRespuestaIA({
+        from,
+        text,
+        messageId,
+        sessionId: obtenerSessionId(from),
+        data: {},
+        respuestaIA: null,
+        processingTimeMs: iaCallEndedAt - iaCallStartedAt,
+        errorApiIA: error?.message || String(error)
+      }));
     }
     console.error("[FAMYBOT_IA] Error consultando API:", construirDetalleErrorLog(error, {
       action: "famybot_ia_chat",

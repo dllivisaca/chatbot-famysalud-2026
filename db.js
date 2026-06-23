@@ -183,6 +183,52 @@ async function registrarDiagnosticoIA(diagnostico) {
   );
 }
 
+async function insertarTrackingFamyBotIA(tracking) {
+  if (!dbConfigurada()) {
+    return;
+  }
+
+  const createdAt = obtenerFechaHoraMysqlEcuador();
+  const intencionesDetectadas = tracking.intenciones_detectadas !== undefined && tracking.intenciones_detectadas !== null
+    ? JSON.stringify(tracking.intenciones_detectadas)
+    : null;
+  const serviciosEncontrados = tracking.servicios_encontrados !== undefined && tracking.servicios_encontrados !== null
+    ? JSON.stringify(tracking.servicios_encontrados)
+    : null;
+
+  await ejecutarPoolConTimezone(
+    `INSERT INTO famybot_ia_tracking
+      (wa_id, phone, message_id, session_id, mensaje_usuario, intencion, intenciones_detectadas,
+       accion, respuesta_ia, incluir_botones_ubicacion, total_resultados_catalogo, search_mode,
+       servicios_encontrados, sin_resultados_catalogo, derivado_asesor, origen, model_version,
+       app_code_version, error_api_ia, tiempo_respuesta_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      tracking.wa_id || null,
+      tracking.phone || null,
+      tracking.message_id || null,
+      tracking.session_id || null,
+      tracking.mensaje_usuario || "",
+      tracking.intencion || null,
+      intencionesDetectadas,
+      tracking.accion || null,
+      tracking.respuesta_ia || null,
+      tracking.incluir_botones_ubicacion ? 1 : 0,
+      tracking.total_resultados_catalogo ?? null,
+      tracking.search_mode || null,
+      serviciosEncontrados,
+      tracking.sin_resultados_catalogo ? 1 : 0,
+      tracking.derivado_asesor ? 1 : 0,
+      tracking.origen || "famybot_ia",
+      tracking.model_version || null,
+      tracking.app_code_version || null,
+      tracking.error_api_ia || null,
+      tracking.tiempo_respuesta_ms ?? null,
+      createdAt
+    ]
+  );
+}
+
 function obtenerFechaHoraMysqlEcuador(fecha = new Date()) {
   const partes = new Intl.DateTimeFormat("en-CA", {
     timeZone: ECUADOR_TIMEZONE,
@@ -1066,6 +1112,7 @@ module.exports = {
   insertarEvento,
   insertarConsultaFamyBotIA,
   registrarDiagnosticoIA,
+  insertarTrackingFamyBotIA,
   obtenerAreasAgendables,
   obtenerServiciosAgendablesPorArea,
   obtenerProfesionalesAgendablesPorServicio,
