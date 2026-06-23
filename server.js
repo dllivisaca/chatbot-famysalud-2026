@@ -565,6 +565,8 @@ const ACCIONES_BOTONES = {
   main_alianza: { type: "menu", menu: "alianzas" },
   main_trabaja: { type: "text_with_main_menu", text: TEXTOS.trabaja },
   main_famybot_ia: { type: "famybot_ia" },
+  famybot_ia_google_maps: { type: "famybot_ia_google_maps" },
+  famybot_ia_croquis: { type: "famybot_ia_croquis" },
   cot_area_back: { type: "quote_area_back" },
   cot_servicio_back: { type: "quote_service_back" },
   volver_cotizar: { type: "restart_quote" },
@@ -3316,6 +3318,18 @@ async function manejarBoton(to, buttonId, messageId) {
     limpiarSesionesUsuario(to);
     actualizarSesionUsuario(to);
     await enviarMenu(to, "principal");
+    return;
+  }
+
+  if (accion.type === "famybot_ia_google_maps") {
+    await enviarUbicacionWhatsApp(to, UBICACION_FAMYSALUD);
+    await enviarBotonMenuFamyBotIA(to);
+    return;
+  }
+
+  if (accion.type === "famybot_ia_croquis") {
+    await enviarImagenLocalWhatsApp(to, UBICACION_FAMYSALUD.croquisPath, "🗺️ Croquis de referencia");
+    await enviarBotonMenuFamyBotIA(to);
     return;
   }
 
@@ -6673,12 +6687,38 @@ function esRespuestaConsultaUbicacionIA(data) {
   return obtenerAccionRespuestaIA(data).toLowerCase() === "consulta_ubicacion";
 }
 
+function debeIncluirBotonesUbicacionIA(data) {
+  return data?.incluir_botones_ubicacion === true;
+}
+
+function botonesUbicacionFamyBotIA() {
+  return [
+    boton("famybot_ia_google_maps", "📍 Google Maps"),
+    boton("famybot_ia_croquis", "🗺️ Ver croquis"),
+    botonMenuPrincipal()
+  ];
+}
+
 async function enviarBotonMenuFamyBotIA(to) {
   await enviarBotones(
     to,
     "Puedes volver al menú principal cuando desees.",
     [boton("main_menu", "🏠 Menú principal")]
   );
+}
+
+async function enviarCierreRespuestaFamyBotIA(to, data) {
+  if (debeIncluirBotonesUbicacionIA(data)) {
+    await enviarBotones(
+      to,
+      "Puedes abrir la ubicación en Google Maps, ver el croquis o volver al menú principal.",
+      botonesUbicacionFamyBotIA()
+    );
+    return "botones_ubicacion";
+  }
+
+  await enviarBotonMenuFamyBotIA(to);
+  return "menu_principal";
 }
 
 function obtenerRespuestaResumenEspecialIA(data) {
@@ -6751,7 +6791,7 @@ Guayaquil, Ecuador
 
 Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
     );
-    await enviarBotonMenuFamyBotIA(from);
+    await enviarCierreRespuestaFamyBotIA(from, data);
     return true;
   }
 
@@ -6767,7 +6807,7 @@ Guayaquil, Ecuador
 
 Aquí te compartimos nuestra ubicación para que puedas llegar fácilmente 💙`
     );
-    await enviarBotonMenuFamyBotIA(from);
+    await enviarCierreRespuestaFamyBotIA(from, data);
     return true;
   }
 
@@ -6988,10 +7028,11 @@ async function manejarRespuestaIA(from, text, messageId) {
       longitudMensajeRespuesta: mensajeRespuesta.length
     });
 
-    await enviarBotonMenuFamyBotIA(from);
-    console.warn("[FAMYBOT_IA_SEND] botón menú enviado", {
+    const cierreRespuesta = await enviarCierreRespuestaFamyBotIA(from, data);
+    console.warn("[FAMYBOT_IA_SEND] cierre de respuesta enviado", {
       messageId,
       from,
+      cierreRespuesta,
       totalResultados,
       resultadosIncluidos,
       longitudMensajeRespuesta: mensajeRespuesta.length
