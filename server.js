@@ -6774,6 +6774,10 @@ async function manejarAccionEspecialRespuestaIA(from, data, messageId) {
     return true;
   }
 
+  if (debeIncluirBotonesUbicacionIA(data) && (esRespuestaConsultaUbicacionIA(data) || esRespuestaUbicacionIA(data))) {
+    return false;
+  }
+
   if (esRespuestaConsultaUbicacionIA(data)) {
     const mensaje = String(data?.mensaje || "").trim();
     await enviarMensajeTexto(
