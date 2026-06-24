@@ -6558,6 +6558,7 @@ async function volverAgendamiento(to, messageId) {
 function construirMensajeRespuestaIA(data) {
   const bloques = [];
   const mensaje = String(data?.mensaje || "").trim();
+  const mensajeParticionado = dividirMensajeUbicacionIA(mensaje);
   const accion = obtenerAccionRespuestaIA(data);
   const resultadosIncluidos = accion === "listar_opciones" && Array.isArray(data.resultados)
     ? data.resultados.slice(0, 10)
@@ -6566,15 +6567,15 @@ function construirMensajeRespuestaIA(data) {
     ? data.total_real ?? data.total ?? data.resultados.length
     : 0;
 
-  if (totalResultados > resultadosIncluidos.length) {
+  if (mensajeParticionado.antesUbicacion) {
+    bloques.push(mensajeParticionado.antesUbicacion);
+  } else if (totalResultados > resultadosIncluidos.length) {
     bloques.push(`Encontré ${totalResultados} opciones relacionadas con tu consulta. Te muestro las primeras 10... Puedes responder con el nombre del servicio que deseas consultar.`);
-  } else if (mensaje) {
-    bloques.push(mensaje);
   }
 
   if (accion === "listar_opciones" && Array.isArray(data.resultados) && data.resultados.length) {
-    if (resultadosIncluidos.some((resultado) => tienePrecioServicioIA(resultado))) {
-      bloques.push("Los siguientes valores corresponden a pagos en efectivo o transferencia.");
+    if (resultadosIncluidos.some((resultado) => tienePrecioServicioIA(resultado)) && !contieneAvisoPagoIA(mensaje)) {
+      bloques.push("Los valores mostrados corresponden a pago en efectivo o transferencia.");
     }
 
     const opciones = resultadosIncluidos
@@ -6598,7 +6599,52 @@ function construirMensajeRespuestaIA(data) {
     }
   }
 
+  if (mensajeParticionado.bloqueUbicacion) {
+    bloques.push(mensajeParticionado.bloqueUbicacion);
+  }
+
   return bloques.join("\n\n").trim() || "FamyBot IA procesó tu consulta, pero no devolvió un mensaje para mostrar.";
+}
+
+function dividirMensajeUbicacionIA(mensaje) {
+  const texto = String(mensaje || "").trim();
+
+  if (!texto) {
+    return {
+      antesUbicacion: "",
+      bloqueUbicacion: ""
+    };
+  }
+
+  const patronesUbicacion = [
+    /(?:^|\n)Estamos ubicados en\s+Quisqu[ií]s\s+1109\s+y\s+Jos[eé]\s+Mascote,\s+Guayaquil\.?/i,
+    /(?:^|\n)Estamos ubicados en\b/i
+  ];
+  const indices = patronesUbicacion
+    .map((patron) => {
+      const match = patron.exec(texto);
+      return match ? match.index + (match[0].startsWith("\n") ? 1 : 0) : -1;
+    })
+    .filter((index) => index >= 0);
+
+  if (!indices.length) {
+    return {
+      antesUbicacion: texto,
+      bloqueUbicacion: ""
+    };
+  }
+
+  const indiceUbicacion = Math.min(...indices);
+
+  return {
+    antesUbicacion: texto.slice(0, indiceUbicacion).trim(),
+    bloqueUbicacion: texto.slice(indiceUbicacion).trim()
+  };
+}
+
+function contieneAvisoPagoIA(texto) {
+  return /Los\s+(?:valores\s+mostrados|siguientes\s+valores)\s+corresponden\s+a\s+pagos?\s+en\s+efectivo\s+o\s+transferencia\.?/i
+    .test(String(texto || ""));
 }
 
 function tienePrecioServicioIA(resultado) {
