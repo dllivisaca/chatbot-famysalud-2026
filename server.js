@@ -82,6 +82,7 @@ const WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG = Number.parseInt(process.env.WHATSAPP_
 const WHATSAPP_REQUEST_TIMEOUT_MS = Number.isInteger(WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG) && WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG > 0
   ? WHATSAPP_REQUEST_TIMEOUT_MS_CONFIG
   : 15000;
+const WHATSAPP_STATUS_REQUEST_TIMEOUT_MS = 5000;
 const SESSION_TTL_MINUTES = Number.parseInt(process.env.SESSION_TTL_MINUTES || "15", 10);
 const SESION_USUARIO_TTL_MS = (Number.isInteger(SESSION_TTL_MINUTES) && SESSION_TTL_MINUTES > 0
   ? SESSION_TTL_MINUTES
@@ -147,6 +148,7 @@ const sesionesAlianza = new Map();
 const sesionesFamyBotIA = new Map();
 const iaMensajesProcesando = new Map();
 const mensajesProcesados = new Map();
+const indicadoresEscrituraEnviados = new Map();
 const notificacionesAsesorPendientesPorWamid = new Map();
 const confirmacionesPayphoneProcesadas = new Map();
 const temporizadoresSesion = new Map();
@@ -342,6 +344,12 @@ function purgarMensajesProcesados(now = Date.now()) {
   for (const [messageId, timestamp] of mensajesProcesados) {
     if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
       mensajesProcesados.delete(messageId);
+    }
+  }
+
+  for (const [messageId, timestamp] of indicadoresEscrituraEnviados) {
+    if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
+      indicadoresEscrituraEnviados.delete(messageId);
     }
   }
 }
@@ -1097,6 +1105,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     marcarMensajeProcesado(messageId, now);
+    marcarMensajeComoLeidoSeguro(messageId);
 
     if (await manejarRespuestaFeriadoAsesorPrincipal(from, rawText)) {
       return res.sendStatus(200);
@@ -3350,7 +3359,7 @@ async function manejarBoton(to, buttonId, messageId) {
   }
 
   if (accion.type === "catalog_areas") {
-    await enviarAreasCotizacion(to);
+    await enviarAreasCotizacion(to, messageId);
     return;
   }
 
@@ -3584,6 +3593,7 @@ async function manejarAgendamientoCita(to, messageId) {
   });
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     const areas = await obtenerAreasAgendables();
 
     guardarSesionAgendamiento(to, {
@@ -3911,6 +3921,7 @@ Ejemplo: 2`
   }
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     const servicios = await obtenerServiciosAgendablesPorArea(areaSeleccionada.id);
 
     guardarSesionAgendamiento(from, {
@@ -3986,6 +3997,7 @@ Ejemplo: 1`
   }
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     const profesionales = await obtenerProfesionalesAgendablesPorServicio(servicioSeleccionado.id);
 
     guardarSesionAgendamiento(from, {
@@ -4116,6 +4128,7 @@ Ejemplo: 1`
       from,
       construirMensajeModalidadUnicaAgendamiento(profesionalSeleccionado.name, modalidad.label)
     );
+    mostrarIndicadorEscrituraSeguro(messageId);
     await continuarDespuesDeModalidadAgendamiento(from, nuevaSesion);
     return;
   }
@@ -4180,6 +4193,7 @@ Por favor responde con 1 para Presencial o 2 para Virtual.`
     }
   });
 
+  mostrarIndicadorEscrituraSeguro(messageId);
   await continuarDespuesDeModalidadAgendamiento(from, nuevaSesion);
 }
 
@@ -4297,6 +4311,7 @@ Ejemplo: 1`
     }
   });
 
+  mostrarIndicadorEscrituraSeguro(messageId);
   await iniciarSeleccionHorarioAgendamiento(from, sesionConFecha);
 }
 
@@ -4424,6 +4439,7 @@ Ejemplo: 1`
   let hold;
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     hold = await crearHoldAgendamientoPersistido({
       phone: from,
       sessionId: obtenerSessionId(from),
@@ -5416,6 +5432,7 @@ ${construirMensajeComprobanteTransferenciaAgendamiento()}`
   }
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     await descargarComprobanteTransferenciaWhatsApp(transferReceipt);
   } catch (error) {
     console.warn("[TRANSFER_RECEIPT_DEBUG] Error validando comprobante recibido:", {
@@ -5561,6 +5578,7 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
   let comprobante;
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     comprobante = await descargarComprobanteTransferenciaWhatsApp(sesion.transferReceipt);
   } catch (error) {
     console.warn("[TRANSFER_RECEIPT_DEBUG] Error descargando comprobante:", {
@@ -5595,6 +5613,7 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
   }
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     console.log("[AGENDAMIENTO_TRANSFERENCIA] Registrando cita en Laravel:", {
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId,
@@ -5964,6 +5983,7 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
   }
 
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     console.log("[AGENDAMIENTO_TARJETA] Creando enlace de pago en Laravel:", {
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId,
@@ -6968,6 +6988,7 @@ async function manejarRespuestaIA(from, text, messageId) {
       url: sanearUrlParaLog(FAMYBOT_IA_API_URL)
     });
 
+    mostrarIndicadorEscrituraSeguro(messageId);
     iaCallStartedAt = Date.now();
     const apiResponse = await axios.post(
       FAMYBOT_IA_API_URL,
@@ -12164,8 +12185,9 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId, origen 
   await enviarDetalleServicioConOpciones(from, construirMensajeDetalleServicio(servicioSeleccionado, from));
 }
 
-async function enviarAreasCotizacion(to) {
+async function enviarAreasCotizacion(to, messageId = null) {
   try {
+    mostrarIndicadorEscrituraSeguro(messageId);
     const catalogo = await consultarCatalogoServicios();
     const areas = extraerAreasCatalogo(catalogo);
 
@@ -12956,6 +12978,74 @@ async function enviarWhatsApp(payload, options = {}) {
       throw error;
     }
   }
+}
+
+async function enviarEstadoMensajeWhatsApp(messageId, payloadExtra = {}, action = "message_status") {
+  if (!messageId) {
+    return;
+  }
+
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+    console.warn("[CONFIG] No se puede actualizar estado WhatsApp: faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID.");
+    return;
+  }
+
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    status: "read",
+    message_id: messageId,
+    ...payloadExtra
+  };
+
+  try {
+    await axios.post(url, payload, {
+      timeout: WHATSAPP_STATUS_REQUEST_TIMEOUT_MS,
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    });
+  } catch (error) {
+    console.warn("[WHATSAPP_UX] No se pudo actualizar estado del mensaje:", {
+      action,
+      messageId,
+      status: error.response?.status || null,
+      error: error.response?.data || error.message
+    });
+  }
+}
+
+function marcarMensajeComoLeidoSeguro(messageId) {
+  enviarEstadoMensajeWhatsApp(messageId, {}, "mark_as_read").catch((error) => {
+    console.warn("[WHATSAPP_UX] Error inesperado marcando mensaje como leido:", {
+      messageId,
+      error: error.message
+    });
+  });
+}
+
+function mostrarIndicadorEscrituraSeguro(messageId) {
+  if (!messageId || indicadoresEscrituraEnviados.has(messageId)) {
+    return;
+  }
+
+  indicadoresEscrituraEnviados.set(messageId, Date.now());
+
+  enviarEstadoMensajeWhatsApp(
+    messageId,
+    {
+      typing_indicator: {
+        type: "text"
+      }
+    },
+    "typing_indicator"
+  ).catch((error) => {
+    console.warn("[WHATSAPP_UX] Error inesperado activando indicador de escritura:", {
+      messageId,
+      error: error.message
+    });
+  });
 }
 
 function esErrorTransitorioWhatsApp(error) {
