@@ -6867,6 +6867,13 @@ function botonesUbicacionFamyBotIA() {
   ];
 }
 
+function botonesSinResultadosCatalogoFamyBotIA() {
+  return [
+    boton("paciente_hablar_asesor", "💬 Hablar con asesor"),
+    botonMenuPrincipal()
+  ];
+}
+
 async function enviarBotonMenuFamyBotIA(to) {
   await enviarBotones(
     to,
@@ -6883,6 +6890,15 @@ async function enviarCierreRespuestaFamyBotIA(to, data) {
       botonesUbicacionFamyBotIA()
     );
     return "botones_ubicacion";
+  }
+
+  if (obtenerAccionRespuestaIA(data).toLowerCase() === "sin_resultados_catalogo") {
+    await enviarBotones(
+      to,
+      "Elige una opción:",
+      botonesSinResultadosCatalogoFamyBotIA()
+    );
+    return "botones_sin_resultados_catalogo";
   }
 
   await enviarBotonMenuFamyBotIA(to);
