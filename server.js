@@ -152,7 +152,7 @@ const indicadoresEscrituraEnviados = new Map();
 const notificacionesAsesorPendientesPorWamid = new Map();
 const confirmacionesPayphoneProcesadas = new Map();
 const temporizadoresSesion = new Map();
-const sesionesExpiradas = new Set();
+const sesionesExpiradas = new Map();
 const ASESOR_WHATSAPP_PRINCIPAL = process.env.ASESOR_WHATSAPP_PRINCIPAL || "593939034743";
 const ASESOR_WHATSAPP_SECUNDARIO = process.env.ASESOR_WHATSAPP_SECUNDARIO || "593939867396";
 const ASESORES_WHATSAPP = [
@@ -1152,7 +1152,7 @@ app.post("/webhook", async (req, res) => {
       if (esSalidaFamyBotIA(text, buttonId)) {
         sesionesFamyBotIA.delete(from);
       } else {
-        actualizarSesionUsuario(from);
+        actualizarSesionUsuario(from, { flujoActivo: true });
         if (!teniaSessionId) {
           registrarEvento(from, "session_started", { messageId });
         }
@@ -1161,19 +1161,22 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    if (debeResetearConversacion(text)) {
-      limpiarSesionesUsuario(from);
-      actualizarSesionUsuario(from);
-      if (!teniaSesionActiva) {
-        registrarEvento(from, "session_started", { messageId });
-      }
-      await enviarMenu(from, "principal");
-      return res.sendStatus(200);
-    }
+    const marcaSesionExpirada = consumirMarcaSesionExpirada(from);
 
-    if (consumirMarcaSesionExpirada(from)) {
+    if (marcaSesionExpirada) {
+      if (marcaSesionExpirada.teniaModoFamyBotIA) {
+        await enviarMensajeConMenuPrincipal(
+          from,
+          "La sesión con FamyBot IA finalizó por inactividad. Puedes volver al menú principal para iniciar nuevamente."
+        );
+      } else {
+        await enviarMensajeTexto(
+          from,
+          "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
+        );
+        await enviarMenu(from, "principal");
+      }
       actualizarSesionUsuario(from, { generarNuevaSesion: false });
-      await enviarMenu(from, "principal");
       return res.sendStatus(200);
     }
 
@@ -1193,6 +1196,16 @@ app.post("/webhook", async (req, res) => {
         await enviarMenu(from, "principal");
       }
       actualizarSesionUsuario(from, { generarNuevaSesion: false });
+      return res.sendStatus(200);
+    }
+
+    if (debeResetearConversacion(text)) {
+      limpiarSesionesUsuario(from);
+      actualizarSesionUsuario(from);
+      if (!teniaSesionActiva) {
+        registrarEvento(from, "session_started", { messageId });
+      }
+      await enviarMenu(from, "principal");
       return res.sendStatus(200);
     }
 
@@ -3330,6 +3343,8 @@ async function manejarBoton(to, buttonId, messageId) {
     await enviarMenu(to, "principal");
     return;
   }
+
+  actualizarSesionUsuario(to, { flujoActivo: true });
 
   if (accion.type === "famybot_ia_google_maps") {
     await enviarUbicacionWhatsApp(to, UBICACION_FAMYSALUD);
@@ -9094,13 +9109,19 @@ function actualizarSesionUsuario(from, opciones = {}) {
   const { generarNuevaSesion = true } = opciones;
   const sesionActual = obtenerSesionUsuario(from);
   const sessionId = sesionActual?.sessionId || (generarNuevaSesion ? generarSessionId() : null);
+  const flujoActivo = opciones.flujoActivo ?? sesionActual?.flujoActivo ?? false;
 
   sesionesUsuarios.set(from, {
     timestamp: Date.now(),
-    sessionId
+    sessionId,
+    flujoActivo
   });
   sesionesExpiradas.delete(from);
-  programarExpiracionSesion(from);
+  if (flujoActivo) {
+    programarExpiracionSesion(from);
+  } else {
+    cancelarExpiracionSesion(from);
+  }
 
   const sesionAgendamiento = sesionesAgendamiento.get(from);
   if (sesionAgendamiento) {
@@ -9155,6 +9176,11 @@ async function expirarSesionUsuario(from) {
     return;
   }
 
+  if (!sesion.flujoActivo) {
+    cancelarExpiracionSesion(from);
+    return;
+  }
+
   if (estaEnFlujoAsesor(from)) {
     cancelarExpiracionSesion(from);
     return;
@@ -9181,27 +9207,12 @@ async function expirarSesionUsuario(from) {
   limpiarSesionProveedor(from);
   limpiarSesionAlianza(from);
   cancelarExpiracionSesion(from);
-  sesionesExpiradas.add(from);
+  sesionesExpiradas.set(from, {
+    teniaModoFamyBotIA
+  });
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
     registrarEvento(from, "session_expired", { sessionId });
-  }
-
-  try {
-    if (teniaModoFamyBotIA) {
-      await enviarMensajeConMenuPrincipal(
-        from,
-        "La sesión con FamyBot IA finalizó por inactividad. Puedes volver al menú principal para iniciar nuevamente."
-      );
-    } else {
-      await enviarMensajeTexto(
-        from,
-        "⏳ Tu sesión anterior expiró por inactividad.\n\nTe mostramos nuevamente el menú principal 😊"
-      );
-      await enviarMenu(from, "principal");
-    }
-  } catch (error) {
-    console.error("[SESION] Error enviando expiracion:", error.response?.data || error.message);
   }
 }
 
@@ -9211,18 +9222,21 @@ function sesionUsuarioActiva(from) {
 }
 
 function consumirMarcaSesionExpirada(from) {
-  if (!sesionesExpiradas.has(from)) {
-    return false;
-  }
+  const marca = sesionesExpiradas.get(from);
 
   sesionesExpiradas.delete(from);
-  return true;
+  return marca || false;
 }
 
 function consumirSesionUsuarioExpirada(from) {
   const sesion = obtenerSesionUsuario(from);
 
   if (!sesion || !sesionExpirada(sesion)) {
+    return false;
+  }
+
+  if (!sesion.flujoActivo) {
+    cancelarExpiracionSesion(from);
     return false;
   }
 
@@ -13322,7 +13336,8 @@ async function restaurarSesionesAgendamientoDesdeBD() {
       sesionesAgendamiento.set(restaurada.phone, restaurada.sesion);
       sesionesUsuarios.set(restaurada.phone, {
         timestamp: restaurada.sesion.timestamp,
-        sessionId: restaurada.sessionId || generarSessionId()
+        sessionId: restaurada.sessionId || generarSessionId(),
+        flujoActivo: true
       });
       sesionesExpiradas.delete(restaurada.phone);
 
