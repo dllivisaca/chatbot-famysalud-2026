@@ -267,6 +267,42 @@ function obtenerSessionId(from) {
   return obtenerSesionUsuario(from)?.sessionId || null;
 }
 
+const CAMPOS_PAYLOAD_EVENTO_ESTANDAR = [
+  ["flow_key", "flowKey"],
+  ["step", "step"],
+  ["previous_step", "previousStep"],
+  ["result", "result"],
+  ["exit_reason", "exitReason"],
+  ["menu_key", "menuKey"],
+  ["button_id", "buttonId"]
+];
+
+function construirPayloadEventoEstandar(datos = {}) {
+  const payload = {};
+
+  for (const [campo, alias] of CAMPOS_PAYLOAD_EVENTO_ESTANDAR) {
+    const valor = datos[campo] ?? datos[alias];
+
+    if (valor !== undefined) {
+      payload[campo] = valor;
+    }
+  }
+
+  return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function construirPayloadEvento(datos = {}) {
+  if (datos.payload !== undefined) {
+    return datos.payload;
+  }
+
+  if (datos.payloadEstandar === true) {
+    return construirPayloadEventoEstandar(datos);
+  }
+
+  return undefined;
+}
+
 function registrarEvento(from, eventType, datos = {}) {
   if (!from) {
     return;
@@ -280,7 +316,7 @@ function registrarEvento(from, eventType, datos = {}) {
     button_id: datos.buttonId,
     menu_key: datos.menuKey,
     flow_key: datos.flowKey,
-    payload: datos.payload
+    payload: construirPayloadEvento(datos)
   };
 
   console.log("[EVENTO] Antes de insertar evento:", {
