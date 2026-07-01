@@ -376,6 +376,24 @@ function obtenerFlowKeyAsesor(origen = "paciente") {
   return "paciente_hablar_asesor";
 }
 
+function obtenerOriginFlowAsesor(origen = "paciente") {
+  if (origen === "empresa") return "empresa";
+  if (origen === "proveedor" || origen === "proveedor_existente") return "proveedor";
+  if (origen === "alianza_potencial" || origen === "alianza_existente") return "alianza";
+  if (origen === "ia" || origen === "famybot_ia") return "IA";
+  if (origen === "menu_principal" || origen === "principal") return "menú principal";
+  if (origen === "paciente") return "paciente";
+  return "otro";
+}
+
+function construirPayloadEventoAsesor(origen = "paciente", datos = {}) {
+  return {
+    flow_key: "advisor",
+    origin_flow: obtenerOriginFlowAsesor(origen),
+    ...datos
+  };
+}
+
 function purgarMensajesProcesados(now = Date.now()) {
   for (const [messageId, timestamp] of mensajesProcesados) {
     if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
@@ -1866,6 +1884,25 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
     return;
   }
 
+  registrarEvento(paciente, "advisor_requested", {
+    messageId,
+    buttonId,
+    flowKey: "advisor",
+    payload: construirPayloadEventoAsesor(origen, {
+      step: "requested",
+      result: "pending"
+    })
+  });
+  registrarEvento(paciente, "advisor_session_requested", {
+    messageId,
+    buttonId,
+    flowKey: "advisor",
+    payload: construirPayloadEventoAsesor(origen, {
+      step: "requested",
+      result: "pending"
+    })
+  });
+
   if (!(await estaEnHorarioLaboralAsesor())) {
     console.log("[ASESOR_FLOW_DEBUG] Decisión iniciarSesionAsesor", {
       decision: "no_notificar_asesor",
@@ -1883,6 +1920,17 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       razon: "fuera_horario",
       paciente,
       origen
+    });
+    registrarEvento(paciente, "advisor_out_of_hours", {
+      messageId,
+      buttonId,
+      flowKey: "advisor",
+      payload: construirPayloadEventoAsesor(origen, {
+        step: "out_of_hours",
+        previous_step: "requested",
+        result: "unavailable",
+        exit_reason: "out_of_hours"
+      })
     });
     await enviarMensajeTexto(paciente, MENSAJE_ASESOR_FUERA_HORARIO);
     return;
@@ -1928,12 +1976,14 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
       registrarEvento(paciente, "advisor_queued", {
         messageId,
         buttonId,
-        flowKey: obtenerFlowKeyAsesor(origen),
-        payload: {
-          origen,
+        flowKey: "advisor",
+        payload: construirPayloadEventoAsesor(origen, {
+          step: "queued",
+          previous_step: "requested",
+          result: "queued",
           queueLength: colaEsperaAsesor.length,
           reason: "all_advisors_busy"
-        }
+        })
       });
       await enviarMensajeTexto(
         paciente,
@@ -1991,12 +2041,6 @@ async function iniciarSesionAsesor(paciente, messageId, buttonId, origen = "paci
   console.log("[ASESOR_DEBUG] Sesión asesor guardada antes de notificar", {
     ...obtenerContextoDebugAsesor(sesionAsesor.asesorId, sesionAsesor)
   });
-  registrarEvento(paciente, "advisor_session_requested", {
-    messageId,
-    buttonId,
-    flowKey: obtenerFlowKeyAsesor(origen)
-  });
-
   try {
     await enviarMensajeTexto(
       paciente,
@@ -2410,12 +2454,14 @@ async function manejarFalloNotificacionAsesor({ sesionAsesor, paciente, origen, 
     registrarEvento(paciente, "advisor_queued", {
       messageId,
       buttonId,
-      flowKey: obtenerFlowKeyAsesor(origen),
-      payload: {
-        origen,
+      flowKey: "advisor",
+      payload: construirPayloadEventoAsesor(origen, {
+        step: "queued",
+        previous_step: "requested",
+        result: "queued",
         queueLength: colaEsperaAsesor.length,
         reason: "advisor_notification_failed"
-      }
+      })
     });
   }
 
@@ -2585,11 +2631,13 @@ async function conectarAsesorConPaciente(asesorId, asesor) {
   });
   console.log("[SESION] Asesor conectado:", sesionAsesor);
   registrarEvento(sesionAsesor.paciente, "advisor_connected", {
-    flowKey: obtenerFlowKeyAsesor(origen),
-    payload: {
-      origen,
-      advisorId: sesionAsesor.asesorId
-    }
+    flowKey: "advisor",
+    payload: construirPayloadEventoAsesor(origen, {
+      step: "connected",
+      previous_step: "assigned",
+      result: "connected",
+      advisor_id: sesionAsesor.asesorId
+    })
   });
 
   await enviarMensajeTexto(
@@ -2824,6 +2872,9 @@ async function manejarColaAsesorMenuPrincipal(paciente) {
   const sesionAsesor = obtenerSesionAsesorPorPaciente(paciente);
   const itemRemovido = quitarPacienteDeColaAsesor(paciente);
   const asesorNotificar = sesionAsesor?.asesor || itemRemovido?.ultimoAsesorNotificado?.phone || null;
+  const abandonoAntesDeConectar = Boolean(itemRemovido) || esSesionEsperandoAceptacionAsesor(sesionAsesor);
+  const origen = sesionAsesor?.origen || itemRemovido?.origen || "paciente";
+  const waitMs = itemRemovido?.creadoEn ? Math.max(Date.now() - itemRemovido.creadoEn, 0) : null;
 
   console.warn("[ASESOR_MENU_DEBUG] Usuario solicitó menú principal desde cola/sesión asesor", {
     paciente,
@@ -2842,6 +2893,20 @@ async function manejarColaAsesorMenuPrincipal(paciente) {
   if (sesionAsesor) {
     finalizarSesionAsesorPersistidaSeguro(sesionAsesor.asesorId, "paciente_salio_cola");
     resetearSesionAsesor(sesionAsesor.asesorId);
+  }
+
+  if (abandonoAntesDeConectar) {
+    registrarEvento(paciente, "advisor_abandoned", {
+      flowKey: "advisor",
+      payload: construirPayloadEventoAsesor(origen, {
+        step: itemRemovido ? "queued" : sesionAsesor?.estado || "assigned",
+        result: "abandoned",
+        exit_reason: "patient_returned_to_menu",
+        advisor_id: sesionAsesor?.asesorId || itemRemovido?.ultimoAsesorNotificado?.id || null,
+        waitMs,
+        wait_seconds: waitMs !== null ? Math.round(waitMs / 1000) : null
+      })
+    });
   }
 
   console.log("[COLA_ASESOR] Paciente sale de cola y vuelve al menu", {
@@ -3140,13 +3205,17 @@ async function finalizarSesionAsesor(asesorId, motivo = "manual") {
     pacientesEnCola: colaEsperaAsesor.length
   });
   registrarEvento(paciente, "advisor_finished", {
-    flowKey: obtenerFlowKeyAsesor(origen),
-    payload: {
-      origen,
-      advisorId: asesorId,
+    flowKey: "advisor",
+    payload: construirPayloadEventoAsesor(origen, {
+      step: "finished",
+      previous_step: "connected",
+      result: motivo === "inactividad" ? "expired" : "completed",
+      exit_reason: motivo,
+      advisor_id: asesorId,
       durationMs,
-      waitMs: Number.isFinite(sesionAsesor.waitMs) ? sesionAsesor.waitMs : 0
-    }
+      waitMs: Number.isFinite(sesionAsesor.waitMs) ? sesionAsesor.waitMs : 0,
+      wait_seconds: Number.isFinite(sesionAsesor.waitMs) ? Math.round(sesionAsesor.waitMs / 1000) : 0
+    })
   });
 
   finalizarSesionAsesorPersistidaSeguro(asesorId, motivo);
@@ -3202,13 +3271,16 @@ async function atenderSiguientePacienteEnCola(asesorId) {
     restantesEnCola: colaEsperaAsesor.length
   });
   registrarEvento(sesionAsesor.paciente, "advisor_dequeued", {
-    flowKey: obtenerFlowKeyAsesor(sesionAsesor.origen),
-    payload: {
-      origen: sesionAsesor.origen,
-      advisorId: asesorId,
+    flowKey: "advisor",
+    payload: construirPayloadEventoAsesor(sesionAsesor.origen, {
+      step: "assigned",
+      previous_step: "queued",
+      result: "advisor_assigned",
+      advisor_id: asesorId,
       queueLength: colaEsperaAsesor.length,
-      waitMs
-    }
+      waitMs,
+      wait_seconds: Math.round(waitMs / 1000)
+    })
   });
 
   await enviarMensajeTexto(
