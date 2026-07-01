@@ -3560,7 +3560,7 @@ async function manejarBoton(to, buttonId, messageId) {
       });
     }
 
-    registrarEvento(to, "flow_completed", {
+    registrarEvento(to, autorizadoFamyBotIA ? "flow_started" : "flow_completed", {
       messageId,
       buttonId,
       flowKey: buttonId,
@@ -7308,7 +7308,7 @@ async function manejarRespuestaIA(from, text, messageId) {
 async function reiniciarCotizacion(from, messageId) {
   const sesion = obtenerSesionCotizacion(from);
 
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId: "volver_cotizar",
     flowKey: "cotizacion",
@@ -7353,7 +7353,7 @@ async function iniciarSolicitudResultados(from, messageId) {
     timestamp: Date.now()
   });
 
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId: "paciente_resultados",
     flowKey: "resultados",
@@ -7374,7 +7374,7 @@ async function iniciarSolicitudResultadosEmpresa(from, messageId, buttonId) {
   });
 
   console.log("[EMPRESA_RESULTADOS] Flujo iniciado:", { from });
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId,
     flowKey: "empresa_resultados",
@@ -7436,7 +7436,7 @@ async function iniciarSolicitudProveedor(from, messageId, buttonId) {
   reiniciarTemporizadorProveedor(from);
 
   console.log("[PROVEEDOR] Flujo iniciado:", { from });
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId,
     flowKey: "proveedor",
@@ -7481,7 +7481,7 @@ async function iniciarSolicitudProveedorExistente(from, messageId, buttonId) {
   reiniciarTemporizadorProveedor(from);
 
   console.log("[PROVEEDOR_EXISTENTE] Flujo iniciado:", { from });
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId,
     flowKey: "proveedor_existente",
@@ -7734,7 +7734,7 @@ async function iniciarSolicitudAlianza(from, messageId, buttonId) {
   reiniciarTemporizadorAlianza(from);
 
   console.log("[ALIANZA] Flujo iniciado:", { from });
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId,
     flowKey: "alianza",
@@ -7779,7 +7779,7 @@ async function iniciarSolicitudAliadoExistente(from, messageId, buttonId) {
   reiniciarTemporizadorAlianza(from);
 
   console.log("[ALIADO_EXISTENTE] Flujo iniciado:", { from });
-  registrarEvento(from, "flow_completed", {
+  registrarEvento(from, "flow_started", {
     messageId,
     buttonId,
     flowKey: "aliado_existente",
