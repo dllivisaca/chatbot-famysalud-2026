@@ -9205,6 +9205,64 @@ function cancelarExpiracionSesion(from) {
   }
 }
 
+function obtenerFlujoAbandonablePorExpiracion(from, now = Date.now()) {
+  const sesionResultados = sesionesResultados.get(from);
+
+  if (sesionResultados) {
+    return {
+      flowKey: "resultados",
+      step: sesionResultados.paso || null,
+      durationMs: sesionResultados.timestamp ? Math.max(now - sesionResultados.timestamp, 0) : null
+    };
+  }
+
+  const sesionResultadosEmpresa = sesionesResultadosEmpresas.get(from);
+
+  if (sesionResultadosEmpresa) {
+    return {
+      flowKey: "empresa_resultados",
+      step: sesionResultadosEmpresa.paso || null,
+      durationMs: sesionResultadosEmpresa.timestamp ? Math.max(now - sesionResultadosEmpresa.timestamp, 0) : null
+    };
+  }
+
+  const sesionFamyBotIA = sesionesFamyBotIA.get(from);
+
+  if (sesionFamyBotIA) {
+    return {
+      flowKey: "main_famybot_ia",
+      step: "chat",
+      durationMs: sesionFamyBotIA.timestamp ? Math.max(now - sesionFamyBotIA.timestamp, 0) : null
+    };
+  }
+
+  return null;
+}
+
+function registrarAbandonoFlujoPorExpiracion(from, sessionId, now = Date.now()) {
+  const flujo = obtenerFlujoAbandonablePorExpiracion(from, now);
+
+  if (!flujo) {
+    return;
+  }
+
+  const payload = {
+    flow_key: flujo.flowKey,
+    step: flujo.step,
+    exit_reason: "session_expired"
+  };
+
+  if (flujo.durationMs !== null) {
+    payload.duration_ms = flujo.durationMs;
+  }
+
+  registrarEvento(from, "flow_abandoned", {
+    sessionId,
+    flowKey: flujo.flowKey,
+    payload
+  });
+}
+
 async function expirarSesionUsuario(from) {
   const sesion = obtenerSesionUsuario(from);
 
@@ -9234,6 +9292,7 @@ async function expirarSesionUsuario(from) {
 
   const sessionId = sesion.sessionId;
   const teniaModoFamyBotIA = sesionesFamyBotIA.has(from);
+  registrarAbandonoFlujoPorExpiracion(from, sessionId);
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   eliminarSesionAgendamiento(from, sessionId);
@@ -9283,6 +9342,7 @@ function consumirSesionUsuarioExpirada(from) {
 
   const sessionId = sesion.sessionId;
   const teniaModoFamyBotIA = sesionesFamyBotIA.has(from);
+  registrarAbandonoFlujoPorExpiracion(from, sessionId);
   sesionesUsuarios.delete(from);
   sesionesCotizacion.delete(from);
   eliminarSesionAgendamiento(from, sessionId);
