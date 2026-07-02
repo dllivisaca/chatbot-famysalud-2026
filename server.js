@@ -3503,6 +3503,7 @@ async function manejarBoton(to, buttonId, messageId) {
       return;
     }
 
+    cerrarFlujoActivoPorMenuPrincipal(to);
     limpiarSesionesUsuario(to);
     actualizarSesionUsuario(to);
     await enviarMenu(to, "principal");
@@ -9424,6 +9425,57 @@ function limpiarSesionesUsuario(from) {
   limpiarSesionProveedor(from);
   sesionesExpiradas.delete(from);
   cancelarExpiracionSesion(from);
+}
+
+function obtenerFlujoActivoParaAbandono(from) {
+  const sesionCotizacion = sesionesCotizacion.get(from);
+
+  if (sesionCotizacion && !sesionCotizacion.servicioSeleccionado) {
+    return {
+      flowKey: "quotation",
+      step: sesionCotizacion.paso || null
+    };
+  }
+
+  const sesionAgendamiento = sesionesAgendamiento.get(from);
+
+  if (sesionAgendamiento && sesionAgendamiento.paso !== "cita_transferencia_registrada") {
+    return {
+      flowKey: "appointment",
+      step: sesionAgendamiento.paso || null
+    };
+  }
+
+  return null;
+}
+
+function cerrarFlujoActivoPorMenuPrincipal(from) {
+  const sesion = obtenerSesionUsuario(from);
+
+  if (!sesion?.flujoActivo || !sesion.sessionId) {
+    return;
+  }
+
+  const flujo = obtenerFlujoActivoParaAbandono(from);
+
+  if (!flujo) {
+    return;
+  }
+
+  registrarEvento(from, "flow_abandoned", {
+    sessionId: sesion.sessionId,
+    flowKey: flujo.flowKey,
+    payload: {
+      flow_key: flujo.flowKey,
+      step: flujo.step,
+      exit_reason: "main_menu"
+    }
+  });
+  cerrarSesionChatbot(sesion.sessionId, "abandoned", "main_menu").catch((error) => {
+    console.warn("[SESION_CHATBOT] No se pudo cerrar resumen abandonado:", construirDetalleErrorLog(error, {
+      sessionId: sesion.sessionId
+    }));
+  });
 }
 
 function programarExpiracionSesion(from, delayMs = SESION_USUARIO_TTL_MS) {
