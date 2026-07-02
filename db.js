@@ -126,6 +126,148 @@ async function insertarEventoConCompatibilidad(evento, incluirSessionId) {
   );
 }
 
+async function crearSesionChatbot(sesion) {
+  if (!dbConfigurada() || !sesion?.session_id || !sesion?.user_hash) {
+    return;
+  }
+
+  const now = obtenerFechaHoraMysqlEcuador();
+
+  try {
+    await ejecutarPoolConTimezone(
+      `INSERT INTO chatbot_sessions
+        (session_id, user_hash, started_at, status, total_events, transferred_to_advisor,
+         appointment_started, appointment_completed, payment_started, payment_completed,
+         quotation_completed, created_at, updated_at)
+       VALUES (?, ?, ?, 'active', 0, 0, 0, 0, 0, 0, 0, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         user_hash = VALUES(user_hash),
+         updated_at = VALUES(updated_at)`,
+      [
+        sesion.session_id,
+        sesion.user_hash,
+        sesion.started_at || now,
+        now,
+        now
+      ]
+    );
+  } catch (error) {
+    console.warn("[DB] No se pudo crear chatbot_session. Continuando:", construirDetalleErrorDb(error, {
+      action: "create_chatbot_session",
+      sessionId: sesion.session_id
+    }));
+  }
+}
+
+function obtenerCampoPayloadEvento(evento, campo) {
+  return evento?.payload && typeof evento.payload === "object" ? evento.payload[campo] : null;
+}
+
+function construirResumenEventoSesion(evento) {
+  const eventType = evento?.event_type || "";
+  const flowKey = obtenerCampoPayloadEvento(evento, "flow_key") || evento?.flow_key || null;
+
+  return {
+    lastFlow: flowKey,
+    lastStep: obtenerCampoPayloadEvento(evento, "step") || obtenerCampoPayloadEvento(evento, "last_step") || null,
+    transferredToAdvisor: eventType.startsWith("advisor_") ? 1 : 0,
+    appointmentStarted: eventType === "appointment_started" ? 1 : 0,
+    appointmentCompleted: eventType === "appointment_completed" ? 1 : 0,
+    paymentStarted: eventType === "payment_started" ? 1 : 0,
+    paymentCompleted: eventType === "payment_completed" ? 1 : 0,
+    quotationCompleted: eventType === "flow_completed" && flowKey === "quotation" ? 1 : 0
+  };
+}
+
+async function actualizarSesionChatbotPorEvento(evento) {
+  if (!dbConfigurada() || !evento?.session_id || !evento?.user_hash) {
+    return;
+  }
+
+  const resumen = construirResumenEventoSesion(evento);
+  const now = obtenerFechaHoraMysqlEcuador();
+  const startedAt = evento.created_at || now;
+
+  try {
+    await ejecutarPoolConTimezone(
+      `INSERT INTO chatbot_sessions
+        (session_id, user_hash, started_at, status, total_events, last_flow, last_step,
+         transferred_to_advisor, appointment_started, appointment_completed, payment_started,
+         payment_completed, quotation_completed, created_at, updated_at)
+       VALUES (?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+           user_hash = VALUES(user_hash),
+           total_events = total_events + 1,
+           last_flow = COALESCE(?, last_flow),
+           last_step = COALESCE(?, last_step),
+           transferred_to_advisor = GREATEST(transferred_to_advisor, ?),
+           appointment_started = GREATEST(appointment_started, ?),
+           appointment_completed = GREATEST(appointment_completed, ?),
+           payment_started = GREATEST(payment_started, ?),
+           payment_completed = GREATEST(payment_completed, ?),
+           quotation_completed = GREATEST(quotation_completed, ?),
+           updated_at = ?`,
+      [
+        evento.session_id,
+        evento.user_hash,
+        startedAt,
+        resumen.lastFlow,
+        resumen.lastStep,
+        resumen.transferredToAdvisor,
+        resumen.appointmentStarted,
+        resumen.appointmentCompleted,
+        resumen.paymentStarted,
+        resumen.paymentCompleted,
+        resumen.quotationCompleted,
+        now,
+        now,
+        resumen.lastFlow,
+        resumen.lastStep,
+        resumen.transferredToAdvisor,
+        resumen.appointmentStarted,
+        resumen.appointmentCompleted,
+        resumen.paymentStarted,
+        resumen.paymentCompleted,
+        resumen.quotationCompleted,
+        now
+      ]
+    );
+  } catch (error) {
+    console.warn("[DB] No se pudo actualizar chatbot_session. Continuando:", construirDetalleErrorDb(error, {
+      action: "update_chatbot_session_by_event",
+      sessionId: evento.session_id,
+      eventType: evento.event_type
+    }));
+  }
+}
+
+async function cerrarSesionChatbot(sessionId, status = "expired", exitReason = null) {
+  if (!dbConfigurada() || !sessionId) {
+    return;
+  }
+
+  const endedAt = obtenerFechaHoraMysqlEcuador();
+
+  try {
+    await ejecutarPoolConTimezone(
+      `UPDATE chatbot_sessions
+       SET ended_at = COALESCE(ended_at, ?),
+           duration_seconds = TIMESTAMPDIFF(SECOND, started_at, ?),
+           status = ?,
+           exit_reason = ?,
+           updated_at = ?
+       WHERE session_id = ?`,
+      [endedAt, endedAt, status, exitReason, endedAt, sessionId]
+    );
+  } catch (error) {
+    console.warn("[DB] No se pudo cerrar chatbot_session. Continuando:", construirDetalleErrorDb(error, {
+      action: "close_chatbot_session",
+      sessionId,
+      status
+    }));
+  }
+}
+
 async function insertarConsultaFamyBotIA(consulta) {
   if (!dbConfigurada()) {
     return;
@@ -1110,6 +1252,9 @@ function columnaSessionIdNoExiste(error) {
 
 module.exports = {
   insertarEvento,
+  crearSesionChatbot,
+  actualizarSesionChatbotPorEvento,
+  cerrarSesionChatbot,
   insertarConsultaFamyBotIA,
   registrarDiagnosticoIA,
   insertarTrackingFamyBotIA,

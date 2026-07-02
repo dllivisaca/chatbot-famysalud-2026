@@ -11,6 +11,9 @@ const path = require("path");
 const nodemailer = require("nodemailer");
 const {
   insertarEvento,
+  crearSesionChatbot,
+  actualizarSesionChatbotPorEvento,
+  cerrarSesionChatbot,
   insertarConsultaFamyBotIA,
   registrarDiagnosticoIA,
   insertarTrackingFamyBotIA,
@@ -330,6 +333,12 @@ function registrarEvento(from, eventType, datos = {}) {
 
   insertarEvento(evento)
     .then(() => {
+      actualizarSesionChatbotPorEvento(evento).catch((error) => {
+        console.warn("[SESION_CHATBOT] No se pudo actualizar por evento:", construirDetalleErrorLog(error, {
+          eventType,
+          sessionId: evento.session_id
+        }));
+      });
       console.log("[EVENTO] Despues de insertar evento:", {
         eventType,
         sessionId: evento.session_id
@@ -9366,12 +9375,23 @@ function actualizarSesionUsuario(from, opciones = {}) {
   const sesionActual = obtenerSesionUsuario(from);
   const sessionId = sesionActual?.sessionId || (generarNuevaSesion ? generarSessionId() : null);
   const flujoActivo = opciones.flujoActivo ?? sesionActual?.flujoActivo ?? false;
+  const sesionNueva = Boolean(sessionId && !sesionActual?.sessionId);
 
   sesionesUsuarios.set(from, {
     timestamp: Date.now(),
     sessionId,
     flujoActivo
   });
+  if (sesionNueva) {
+    crearSesionChatbot({
+      session_id: sessionId,
+      user_hash: hashUsuario(from)
+    }).catch((error) => {
+      console.warn("[SESION_CHATBOT] No se pudo crear resumen:", construirDetalleErrorLog(error, {
+        sessionId
+      }));
+    });
+  }
   sesionesExpiradas.delete(from);
   if (flujoActivo) {
     programarExpiracionSesion(from);
@@ -9527,6 +9547,11 @@ async function expirarSesionUsuario(from) {
   });
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
+    cerrarSesionChatbot(sessionId, "expired", "session_expired").catch((error) => {
+      console.warn("[SESION_CHATBOT] No se pudo cerrar resumen expirado:", construirDetalleErrorLog(error, {
+        sessionId
+      }));
+    });
     registrarEvento(from, "session_expired", { sessionId });
   }
 }
@@ -9573,6 +9598,11 @@ function consumirSesionUsuarioExpirada(from) {
   cancelarExpiracionSesion(from);
   console.log("[SESION] Expirada", { from });
   if (sessionId) {
+    cerrarSesionChatbot(sessionId, "expired", "session_expired").catch((error) => {
+      console.warn("[SESION_CHATBOT] No se pudo cerrar resumen expirado:", construirDetalleErrorLog(error, {
+        sessionId
+      }));
+    });
     registrarEvento(from, "session_expired", { sessionId });
   }
 
