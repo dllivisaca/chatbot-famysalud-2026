@@ -7529,9 +7529,11 @@ async function reiniciarCotizacion(from, messageId) {
   registrarEvento(from, "flow_started", {
     messageId,
     buttonId: "volver_cotizar",
-    flowKey: "cotizacion",
+    flowKey: "quotation",
     payload: {
-      action: "restart_quote"
+      action: "restart_quote",
+      flow_key: "quotation",
+      step: "esperando_area"
     }
   });
 
@@ -12523,6 +12525,21 @@ async function manejarSeleccionAreaCotizacion(from, text, messageId, origen = "t
     timestamp: Date.now()
   });
 
+  registrarEvento(from, "flow_step_completed", {
+    messageId,
+    flowKey: "quotation",
+    payload: {
+      flow_key: "quotation",
+      step: "area_selected",
+      result: "completed",
+      interactionType: origen,
+      selectedIndex: indiceArea,
+      areaId: areaSeleccionada.id,
+      areaTitle: areaSeleccionada.title,
+      totalServices: servicios.length
+    }
+  });
+
   await enviarServiciosCotizacionConNavegacion(from, areaSeleccionada, servicios);
 }
 
@@ -12579,10 +12596,29 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId, origen 
     timestamp: Date.now()
   });
 
+  registrarEvento(from, "flow_step_completed", {
+    messageId,
+    flowKey: "quotation",
+    payload: {
+      flow_key: "quotation",
+      step: "service_selected",
+      result: "completed",
+      interactionType: origen,
+      selectedIndex: indiceServicio,
+      areaId: sesion?.areaSeleccionada?.id,
+      areaTitle: sesion?.areaSeleccionada?.title,
+      servicioId: servicioSeleccionado.id,
+      servicioTitle: servicioSeleccionado.title
+    }
+  });
+
   registrarEvento(from, "flow_completed", {
     messageId,
-    flowKey: "cotizacion",
+    flowKey: "quotation",
     payload: {
+      flow_key: "quotation",
+      step: "quote_detail_shown",
+      result: "completed",
       areaId: sesion?.areaSeleccionada?.id,
       areaTitle: sesion?.areaSeleccionada?.title,
       servicioId: servicioSeleccionado.id,
@@ -12613,6 +12649,18 @@ async function enviarAreasCotizacion(to, messageId = null) {
     console.log("[CATALOGO] Areas disponibles enviadas:", {
       to,
       totalAreas: areas.length
+    });
+
+    registrarEvento(to, "flow_started", {
+      messageId,
+      buttonId: "paciente_cotizar",
+      flowKey: "quotation",
+      payload: {
+        flow_key: "quotation",
+        step: "esperando_area",
+        result: "started",
+        totalAreas: areas.length
+      }
     });
 
     await enviarAreasCotizacionConNavegacion(to, areas);
