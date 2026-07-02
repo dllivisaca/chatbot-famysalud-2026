@@ -9498,6 +9498,26 @@ function cancelarExpiracionSesion(from) {
 }
 
 function obtenerFlujoAbandonablePorExpiracion(from, now = Date.now()) {
+  const sesionCotizacion = sesionesCotizacion.get(from);
+
+  if (sesionCotizacion && !sesionCotizacion.servicioSeleccionado) {
+    return {
+      flowKey: "quotation",
+      step: sesionCotizacion.paso || null,
+      durationMs: sesionCotizacion.timestamp ? Math.max(now - sesionCotizacion.timestamp, 0) : null
+    };
+  }
+
+  const sesionAgendamiento = sesionesAgendamiento.get(from);
+
+  if (sesionAgendamiento && sesionAgendamiento.paso !== "cita_transferencia_registrada") {
+    return {
+      flowKey: "appointment",
+      step: sesionAgendamiento.paso || null,
+      durationMs: sesionAgendamiento.timestamp ? Math.max(now - sesionAgendamiento.timestamp, 0) : null
+    };
+  }
+
   const sesionResultados = sesionesResultados.get(from);
 
   if (sesionResultados) {
