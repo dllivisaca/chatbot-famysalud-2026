@@ -394,6 +394,13 @@ function construirPayloadEventoAsesor(origen = "paciente", datos = {}) {
   };
 }
 
+function construirPayloadEventoPago(datos = {}) {
+  return {
+    flow_key: "payment",
+    ...datos
+  };
+}
+
 function purgarMensajesProcesados(now = Date.now()) {
   for (const [messageId, timestamp] of mensajesProcesados) {
     if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
@@ -797,10 +804,33 @@ app.post("/internal/payphone/approved", async (req, res) => {
       userHash: hashUsuario(whatsappConversationId),
       error: resultado.error
     });
+    registrarEvento(whatsappConversationId, "payment_failed", {
+      flowKey: "payment",
+      payload: construirPayloadEventoPago({
+        step: "payment_confirmation",
+        payment_method: payload.payment_method || "card",
+        result: "failed",
+        reason: "whatsapp_confirmation_failed",
+        booking_id: bookingId,
+        client_transaction_id: payload.client_transaction_id || payload.clientTransactionId || null,
+        payment_status: payload.payment_status || null
+      })
+    });
     return res.status(502).json({ ok: false, error: "whatsapp_send_failed" });
   }
 
   marcarConfirmacionPayphoneProcesada(claveConfirmacion, now);
+  registrarEvento(whatsappConversationId, "payment_completed", {
+    flowKey: "payment",
+    payload: construirPayloadEventoPago({
+      step: "payment_confirmation",
+      payment_method: payload.payment_method || "card",
+      result: "approved",
+      booking_id: bookingId,
+      client_transaction_id: payload.client_transaction_id || payload.clientTransactionId || null,
+      payment_status: payload.payment_status || null
+    })
+  });
   eliminarSesionAgendamiento(whatsappConversationId);
 
   console.log("[PAYPHONE_WEBHOOK] Confirmacion enviada:", {
@@ -5322,6 +5352,18 @@ Responde con el número de la opción.`
 
   guardarSesionAgendamiento(from, sesionConPago);
 
+  registrarEvento(from, "payment_started", {
+    messageId,
+    flowKey: "payment",
+    payload: construirPayloadEventoPago({
+      step: "payment_method_selected",
+      payment_method: paymentMethod,
+      amount: sesionConPago.paymentAmount,
+      amount_standard: sesionConPago.paymentAmountStandard,
+      discount_amount: sesionConPago.paymentDiscountAmount
+    })
+  });
+
   await enviarTerminosPagoAgendamiento(from);
 }
 
@@ -6056,6 +6098,18 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
       timestamp: Date.now()
     });
 
+    registrarEvento(from, "payment_failed", {
+      messageId,
+      flowKey: "payment",
+      payload: construirPayloadEventoPago({
+        step: "payment_link_creation",
+        payment_method: "card",
+        result: "failed",
+        reason: "missing_payment_data",
+        missing: erroresSesion
+      })
+    });
+
     await enviarMensajeAgendamientoConNavegacion(
       from,
       "No pudimos generar el enlace de pago en este momento.\n\nPor favor intenta nuevamente o selecciona otro m\u00e9todo de pago."
@@ -6096,6 +6150,17 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
       paymentTermsAccepted: false,
       transferTermsAccepted: false,
       timestamp: Date.now()
+    });
+
+    registrarEvento(from, "payment_failed", {
+      messageId,
+      flowKey: "payment",
+      payload: construirPayloadEventoPago({
+        step: "payment_link_creation",
+        payment_method: "card",
+        result: "failed",
+        reason: "missing_appweb_api_key"
+      })
     });
 
     await enviarMensajeAgendamientoConNavegacion(
@@ -6145,6 +6210,18 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
           paymentHoldId: sesionPagoTarjeta.paymentHoldId
         }
       });
+      registrarEvento(from, "payment_link_created", {
+        messageId,
+        flowKey: "payment",
+        payload: construirPayloadEventoPago({
+          step: "payment_link_created",
+          payment_method: "card",
+          result: "created",
+          client_transaction_id: sesionPagoTarjeta.clientTransactionId,
+          payment_hold_id: sesionPagoTarjeta.paymentHoldId,
+          amount: sesionPagoTarjeta.paymentAmountStandard
+        })
+      });
 
       await enviarOpcionesPagoTarjetaGeneradoAgendamiento(from, paymentUrl);
       return;
@@ -6177,6 +6254,18 @@ async function manejarCreacionPagoTarjetaAgendamiento(from, messageId, sesion) {
     paymentTermsAccepted: false,
     transferTermsAccepted: false,
     timestamp: Date.now()
+  });
+
+  registrarEvento(from, "payment_failed", {
+    messageId,
+    flowKey: "payment",
+    payload: construirPayloadEventoPago({
+      step: "payment_link_creation",
+      payment_method: "card",
+      result: "failed",
+      reason: "payment_link_creation_failed",
+      amount: sesion?.paymentAmountStandard || null
+    })
   });
 
   await enviarMensajeAgendamientoConNavegacion(
