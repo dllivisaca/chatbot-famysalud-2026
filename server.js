@@ -12618,6 +12618,8 @@ async function manejarSeleccionAreaCotizacion(from, text, messageId, origen = "t
       selectedIndex: indiceArea,
       areaId: areaSeleccionada.id,
       areaTitle: areaSeleccionada.title,
+      area_id: areaSeleccionada.id,
+      area_name: areaSeleccionada.title,
       totalServices: servicios.length
     }
   });
@@ -12689,8 +12691,12 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId, origen 
       selectedIndex: indiceServicio,
       areaId: sesion?.areaSeleccionada?.id,
       areaTitle: sesion?.areaSeleccionada?.title,
+      area_id: sesion?.areaSeleccionada?.id,
+      area_name: sesion?.areaSeleccionada?.title,
       servicioId: servicioSeleccionado.id,
-      servicioTitle: servicioSeleccionado.title
+      servicioTitle: servicioSeleccionado.title,
+      service_id: servicioSeleccionado.id,
+      service_name: servicioSeleccionado.title
     }
   });
 
@@ -12703,8 +12709,12 @@ async function manejarSeleccionServicioCotizacion(from, text, messageId, origen 
       result: "completed",
       areaId: sesion?.areaSeleccionada?.id,
       areaTitle: sesion?.areaSeleccionada?.title,
+      area_id: sesion?.areaSeleccionada?.id,
+      area_name: sesion?.areaSeleccionada?.title,
       servicioId: servicioSeleccionado.id,
-      servicioTitle: servicioSeleccionado.title
+      servicioTitle: servicioSeleccionado.title,
+      service_id: servicioSeleccionado.id,
+      service_name: servicioSeleccionado.title
     }
   });
   await enviarDetalleServicioConOpciones(from, construirMensajeDetalleServicio(servicioSeleccionado, from));
