@@ -401,6 +401,13 @@ function construirPayloadEventoPago(datos = {}) {
   };
 }
 
+function construirPayloadEventoAgendamiento(datos = {}) {
+  return {
+    flow_key: "appointment",
+    ...datos
+  };
+}
+
 function purgarMensajesProcesados(now = Date.now()) {
   for (const [messageId, timestamp] of mensajesProcesados) {
     if (now - timestamp > MENSAJES_PROCESADOS_TTL_MS) {
@@ -829,6 +836,17 @@ app.post("/internal/payphone/approved", async (req, res) => {
       booking_id: bookingId,
       client_transaction_id: payload.client_transaction_id || payload.clientTransactionId || null,
       payment_status: payload.payment_status || null
+    })
+  });
+  registrarEvento(whatsappConversationId, "appointment_completed", {
+    flowKey: "appointment",
+    payload: construirPayloadEventoAgendamiento({
+      step: "booking_registered",
+      result: "completed",
+      payment_method: payload.payment_method || "card",
+      booking_id: bookingId,
+      client_transaction_id: payload.client_transaction_id || payload.clientTransactionId || null,
+      appointment_channel: payload.appointment_channel || null
     })
   });
   eliminarSesionAgendamiento(whatsappConversationId);
@@ -3744,6 +3762,15 @@ async function manejarAgendamientoCita(to, messageId) {
       step: "seleccionando_area"
     }
   });
+  registrarEvento(to, "appointment_started", {
+    messageId,
+    buttonId: "paciente_agendar_cita",
+    flowKey: "appointment",
+    payload: construirPayloadEventoAgendamiento({
+      step: "seleccionando_area",
+      result: "started"
+    })
+  });
 
   try {
     mostrarIndicadorEscrituraSeguro(messageId);
@@ -4654,6 +4681,21 @@ Ejemplo: 1`
       professionalId: sesion.professionalId,
       serviceId: sesion.serviceId
     }
+  });
+  registrarEvento(from, "appointment_hold_created", {
+    messageId,
+    flowKey: "appointment",
+    payload: construirPayloadEventoAgendamiento({
+      step: "hold_created",
+      result: "created",
+      appointment_hold_id: hold.id,
+      appointment_hold_expires_at: hold.expiresAtMs,
+      professional_id: sesion.professionalId,
+      service_id: sesion.serviceId,
+      appointment_date: sesion.appointmentDate,
+      appointment_time: slotStartEc,
+      appointment_end_time: slotEndEc
+    })
   });
 
   await enviarMensajeAgendamientoConNavegacion(
@@ -5846,6 +5888,21 @@ async function registrarCitaTransferenciaAgendamiento(from, sesion, messageId = 
           action: "transfer_booking_registered",
           bookingId: bookingId || null
         }
+      });
+      registrarEvento(from, "appointment_completed", {
+        messageId,
+        flowKey: "appointment",
+        payload: construirPayloadEventoAgendamiento({
+          step: "booking_registered",
+          result: "completed",
+          payment_method: "transfer",
+          booking_id: bookingId || null,
+          appointment_hold_id: holdIdRegistrado,
+          professional_id: sesion.professionalId,
+          service_id: sesion.serviceId,
+          appointment_date: sesion.appointmentDate,
+          appointment_time: sesion.appointmentTime
+        })
       });
 
       await enviarMensajeFinalCitaTransferenciaRegistradaSeguro(from, sesionRegistrada);
@@ -9534,6 +9591,23 @@ function limpiarSesionesAgendamientoExpiradas() {
       phone,
       appointmentHoldId: sesion.appointmentHoldId || null
     });
+    if (sesion.appointmentHoldId) {
+      registrarEvento(phone, "appointment_hold_expired", {
+        sessionId,
+        flowKey: "appointment",
+        payload: construirPayloadEventoAgendamiento({
+          step: "hold_expired",
+          result: "expired",
+          exit_reason: "session_expired",
+          appointment_hold_id: sesion.appointmentHoldId,
+          appointment_hold_expires_at: sesion.appointmentHoldExpiresAt || null,
+          professional_id: sesion.professionalId || null,
+          service_id: sesion.serviceId || null,
+          appointment_date: sesion.appointmentDate || null,
+          appointment_time: sesion.appointmentTime || null
+        })
+      });
+    }
     eliminarSesionAgendamiento(phone, sessionId);
   }
 }
